@@ -39,7 +39,7 @@
 
 ## Команди в Telegram (за бажанням): /today /tomorrow /week /changes
 
-Розсилки працюють і без цього. Щоб бот **відповідав на команди миттєво**, потрібен безкоштовний Cloudflare Worker:
+Розсилки працюють і без цього. Щоб бот **відповідав на кнопки й команди миттєво** (📅 Сьогодні · ➡️ Завтра · 🗓 Тиждень · 🔄 Заміни · ℹ️ Допомога, стрілки ◀️ ▶️ для перегляду днів), потрібен безкоштовний Cloudflare Worker:
 
 1. Зареєструйся на https://dash.cloudflare.com → **Workers & Pages → Create → Worker** → «Hello World» → **Deploy**.
 2. **Edit code** → встав вміст `worker/worker.js` → **Deploy**.
@@ -51,7 +51,7 @@
    `https://api.telegram.org/bot<ТОКЕН>/setWebhook?url=https://<назва-воркера>.<акаунт>.workers.dev&secret_token=<WEBHOOK_SECRET>`
    → має бути `"ok":true`.
 5. Напиши боту `/start` — він покаже меню і ID чату.
-6. (Необов'язково) у @BotFather → `/setcommands` → вибери бота → встав:
+6. (Не потрібно — бот сам виставляє меню команд і опис при кожній розсилці.) Раніше це робили вручну так: у @BotFather → `/setcommands`:
    ```
    today - Пари сьогодні
    tomorrow - Пари завтра

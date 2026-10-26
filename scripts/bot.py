@@ -31,6 +31,7 @@ TZ = ZoneInfo(CFG.get("timezone", "Europe/Kyiv"))
 PAGE = "http://plc.nlu.edu.ua/%d0%bd%d0%b0%d0%b2%d1%87%d0%b0%d0%bb%d1%8c%d0%bd%d0%b0-%d1%80%d0%be%d0%b1%d0%be%d1%82%d0%b0/%d1%80%d0%be%d0%b7%d0%ba%d0%bb%d0%b0%d0%b4-%d0%b7%d0%b0%d0%bd%d1%8f%d1%82%d1%8c/"
 UA = {"User-Agent": "Mozilla/5.0 (pfk-rozklad bot; +github)"}
 TIMES = {1: ("08:00", "09:20"), 2: ("09:30", "10:50"), 3: ("11:00", "12:15"), 4: ("12:45", "14:00"), 5: ("14:10", "15:30"), 6: ("15:40", "17:00")}
+SHORTD = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Нд"]
 DAYN = ["Понеділок", "Вівторок", "Середа", "Четвер", "П'ятниця", "Субота", "Неділя"]
 MONTHS = {"січ": 1, "лют": 2, "бер": 3, "кві": 4, "тра": 5, "чер": 6, "лип": 7, "сер": 8, "вер": 9, "жов": 10, "лис": 11, "гру": 12}
 NUM = "1️⃣ 2️⃣ 3️⃣ 4️⃣ 5️⃣ 6️⃣".split()
@@ -298,7 +299,7 @@ def fmt_day(plan, title):
 
 
 # ---------------------------------------------------------------- Telegram
-def tg_send(text):
+def tg_send(text, buttons=True):
     token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
     chats = [c.strip() for c in os.environ.get("TELEGRAM_CHAT_ID", "").split(",") if c.strip()]
     if not token or not chats:
@@ -312,8 +313,13 @@ def tg_send(text):
         "Unauthorized": "невірний TELEGRAM_BOT_TOKEN",
     }
     for chat in chats:
-        body = urllib.parse.urlencode({"chat_id": chat, "text": text, "parse_mode": "HTML",
-                                       "disable_web_page_preview": "true"}).encode()
+        payload = {"chat_id": chat, "text": text, "parse_mode": "HTML", "disable_web_page_preview": "true"}
+        site = CFG.get("site_url", "")
+        if buttons and site:
+            payload["reply_markup"] = json.dumps({"inline_keyboard": [[
+                {"text": "🌐 Сайт", "url": site},
+                {"text": "📲 Календар", "url": site + "rozklad.ics"}]]})
+        body = urllib.parse.urlencode(payload).encode()
         try:
             urllib.request.urlopen(f"https://api.telegram.org/bot{token}/sendMessage", body, timeout=30).read()
             print(f"Надіслано в чат …{chat[-4:]}")
@@ -331,15 +337,65 @@ def tg_send(text):
         sys.exit("Жодне повідомлення не доставлено — дивись помилку вище.")
 
 
+def fmt_week(monday):
+    head = f"🗓 <b>Тиждень {monday:%d.%m}–{(monday + timedelta(days=4)):%d.%m}</b> — {escape(CFG['group'])}"
+    lines = [head]
+    for i in range(5):
+        d = monday + timedelta(days=i)
+        plan = day_plan(d)
+        if plan.get("error"):
+            lines.append(f"<b>{SHORTD[d.weekday()]} {d:%d.%m}</b>: ⚠️ розклад ще не оновлено"); continue
+        live = [x for x in plan["items"] if not x.get("cancelled")]
+        if not live:
+            lines.append(f"<b>{SHORTD[d.weekday()]} {d:%d.%m}</b>: пар немає 🎉"); continue
+        subj = " · ".join(escape(x["subject"]) + (" 🔄" if x.get("changed") else "") for x in live)
+        lines.append(f"<b>{SHORTD[d.weekday()]} {d:%d.%m}</b> ({live[0]['start']}–{live[-1]['end']}, {len(live)} пар)\n{subj}")
+        if any(x.get("cancelled") for x in plan["items"]):
+            lines[-1] += "\n⚠️ є «вікно»"
+    return "\n\n".join(lines)
+
+
+def setup_bot():
+    """Меню команд і опис бота (виконується автоматично; BotFather вручну не потрібен)."""
+    token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+    if not token:
+        return
+    def call(method, data):
+        try:
+            urllib.request.urlopen(f"https://api.telegram.org/bot{token}/{method}",
+                                   json.dumps(data).encode(), timeout=20).read()
+        except Exception as e:  # noqa: BLE001
+            print(f"{method}: {e}", file=sys.stderr)
+    hdr = {"Content-Type": "application/json"}
+    def post(method, data):
+        req = urllib.request.Request(f"https://api.telegram.org/bot{token}/{method}", json.dumps(data).encode(), hdr)
+        try:
+            urllib.request.urlopen(req, timeout=20).read()
+        except Exception as e:  # noqa: BLE001
+            print(f"{method}: {e}", file=sys.stderr)
+    post("setMyCommands", {"commands": [
+        {"command": "today", "description": "Пари сьогодні"},
+        {"command": "tomorrow", "description": "Пари завтра"},
+        {"command": "week", "description": "Розклад на тиждень"},
+        {"command": "changes", "description": "Заміни"},
+        {"command": "help", "description": "Допомога"}]})
+    post("setMyDescription", {"description": f"Розклад групи {CFG['group']} (ПФК НЮУ): пари на сьогодні й завтра, огляд тижня, заміни. Дані з plc.nlu.edu.ua."})
+    post("setMyShortDescription", {"short_description": f"Розклад і заміни {CFG['group']} · ПФК НЮУ"})
+
+
 def cmd_notify(a):
+    setup_bot()
     state = jload(DATA / "state.json", {"events": []})
     site = CFG.get("site_url", "")
     msgs = []
     if a.mode == "morning" and today().weekday() < 5:
         msgs.append(fmt_day(day_plan(today()), "Сьогодні"))
-    if a.mode == "evening":
+    if a.mode in ("evening", "weekly"):
         tm = today() + timedelta(days=1)
-        if tm.weekday() < 5:
+        if a.mode == "weekly" or today().weekday() == 6:
+            nxt_mon = today() + timedelta(days=(7 - today().weekday()) % 7 or 7)
+            msgs.append(fmt_week(nxt_mon if today().weekday() >= 5 else today() - timedelta(days=today().weekday())))
+        elif tm.weekday() < 5:
             msgs.append(fmt_day(day_plan(tm), "Завтра"))
     for e in state.get("events", []):
         if e.get("sent"):
@@ -439,7 +495,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("update"); sub.add_parser("site")
-    n = sub.add_parser("notify"); n.add_argument("--mode", choices=["morning", "evening", "watch"], default="watch")
+    n = sub.add_parser("notify"); n.add_argument("--mode", choices=["morning", "evening", "weekly", "watch"], default="watch")
     s = sub.add_parser("show"); s.add_argument("--date")
     a = ap.parse_args()
     {"update": cmd_update, "notify": cmd_notify, "show": cmd_show, "site": lambda _a: build_site()}[a.cmd](a)

@@ -46,7 +46,7 @@ jobs:
         run: |
           MODE="${INPUT_MODE:-watch}"
           if [ "$SCHED" = "15 4 * * 1-5" ]; then MODE=morning; fi
-          if [ "$SCHED" = "0 16 * * 0-4" ]; then MODE=evening; fi
+          if [ "$SCHED" = "0 16 * * 0-4" ]; then MODE=evening; fi   # у неділю evening = огляд тижня
           if [ "$SCHED" = "40 7,10,13 * * 1-5" ]; then MODE=watch; fi
           echo "Режим: $MODE"
           python scripts/bot.py notify --mode "$MODE"
