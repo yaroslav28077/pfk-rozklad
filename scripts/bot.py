@@ -15,6 +15,7 @@ import json
 import os
 import re
 import sys
+import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import date, datetime, timedelta
@@ -302,14 +303,32 @@ def tg_send(text):
     chats = [c.strip() for c in os.environ.get("TELEGRAM_CHAT_ID", "").split(",") if c.strip()]
     if not token or not chats:
         print("[Telegram не налаштовано — повідомлення лише в лог]\n" + re.sub(r"<[^>]+>", "", text)); return
+    ok = 0
+    hints = {
+        "chat not found": "невірний TELEGRAM_CHAT_ID або ти ще не писав боту",
+        "bot can't initiate conversation": "відкрий бота в Telegram і натисни START (/start)",
+        "bots can't send messages to bots": "у TELEGRAM_CHAT_ID стоїть ID бота (цифри з токена), а треба твій chat id з getUpdates",
+        "bot was blocked by the user": "ти заблокував бота — розблокуй і натисни START",
+        "Unauthorized": "невірний TELEGRAM_BOT_TOKEN",
+    }
     for chat in chats:
         body = urllib.parse.urlencode({"chat_id": chat, "text": text, "parse_mode": "HTML",
                                        "disable_web_page_preview": "true"}).encode()
         try:
             urllib.request.urlopen(f"https://api.telegram.org/bot{token}/sendMessage", body, timeout=30).read()
             print(f"Надіслано в чат …{chat[-4:]}")
+            ok += 1
+        except urllib.error.HTTPError as e:
+            try:
+                desc = json.loads(e.read().decode()).get("description", "")
+            except Exception:  # noqa: BLE001
+                desc = ""
+            hint = next((v for k, v in hints.items() if k.lower() in desc.lower()), "")
+            print(f"Telegram помилка для …{chat[-4:]}: {e.code} {desc}" + (f"\n  ➜ Що зробити: {hint}" if hint else ""), file=sys.stderr)
         except Exception as e:  # noqa: BLE001
             print(f"Telegram помилка для …{chat[-4:]}: {e}", file=sys.stderr)
+    if ok == 0:
+        sys.exit("Жодне повідомлення не доставлено — дивись помилку вище.")
 
 
 def cmd_notify(a):
