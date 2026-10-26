@@ -72,10 +72,10 @@ function route(site, base, key) {
   return null;
 }
 function keyFromText(t) {
-  t = t.toLowerCase();
+  t = t.toLowerCase().replace(/@\w+/, "").trim();
   if (t.startsWith("/start") || t.startsWith("/help") || t.includes("допомог")) return "help";
-  if (t.startsWith("/today") || t.includes("сьогодн")) return "today";
-  if (t.startsWith("/tomorrow") || t.includes("завтра")) return "tomorrow";
+  if (t.startsWith("/today") || t.startsWith("/tod") || t.includes("сьогодн")) return "today";
+  if (t.startsWith("/tom") || t.includes("завтра") || t.includes("tomor")) return "tomorrow";
   if (t.startsWith("/week") || t.includes("тижд")) return "week";
   if (t.startsWith("/changes") || t.includes("замін") || t.includes("змін")) return "changes";
   return null;
