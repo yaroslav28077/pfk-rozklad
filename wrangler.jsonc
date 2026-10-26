@@ -1,0 +1,9 @@
+{
+  "name": "pfk-rozklad",
+  "main": "worker/worker.js",
+  "compatibility_date": "2025-10-01",
+  "workers_dev": true,
+  "vars": {
+    "SITE_URL": "https://yaroslav28077.github.io/pfk-rozklad/"
+  }
+}
