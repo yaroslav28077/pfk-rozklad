@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="uk">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Розклад СОБ-11 · ПФК НЮУ</title>
+  <meta name="theme-color" content="#1f3a5f">
+  <link rel="stylesheet" href="style.css">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📅</text></svg>">
+</head>
+<body>
+  <header class="top">
+    <div>
+      <h1 id="title">Розклад</h1>
+      <p class="sub" id="subtitle">завантаження…</p>
+    </div>
+    <a class="btn" id="ics" href="rozklad.ics" download>📲 У календар</a>
+  </header>
+
+  <div id="banner" class="banner hidden"></div>
+
+  <nav class="tabs" role="tablist">
+    <button data-tab="today" class="active">Сьогодні</button>
+    <button data-tab="tomorrow">Завтра</button>
+    <button data-tab="week">Тиждень</button>
+    <button data-tab="changes">Заміни</button>
+    <button data-tab="files">PDF</button>
+  </nav>
+
+  <main id="view"></main>
+
+  <footer class="foot">
+    <span id="checked"></span> ·
+    <a id="src" href="#" target="_blank" rel="noopener">сторінка розкладу коледжу</a>
+    <br><small>Неофіційний сайт. Джерело — PDF на plc.nlu.edu.ua; при розбіжностях пріоритет за офіційними оголошеннями.</small>
+  </footer>
+  <script src="app.js"></script>
+</body>
+</html>

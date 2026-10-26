@@ -1,0 +1,49 @@
+{
+  "files": {
+    "РОЗКЛАД-1-курс-05.10-30.10-2.pdf": {
+      "kind": "kurs1",
+      "title": "РОЗКЛАД 1 курс 05.10-30.10",
+      "url": "http://plc.nlu.edu.ua/wp-content/uploads/2016/09/%D0%A0%D0%9E%D0%97%D0%9A%D0%9B%D0%90%D0%94-1-%D0%BA%D1%83%D1%80%D1%81-05.10-30.10-2.pdf",
+      "sha256": "2f7061b69d160b68c480243623a9af09800f8c44b932095eb4bdc7fc581635ff",
+      "first_seen": "2026-10-26T19:30+02:00"
+    },
+    "РОЗКЛАД-2-курс-05_1.10-30.pdf": {
+      "kind": "kurs2",
+      "title": "РОЗКЛАД 2 курс 05.10-30.10",
+      "url": "http://plc.nlu.edu.ua/wp-content/uploads/2016/09/%D0%A0%D0%9E%D0%97%D0%9A%D0%9B%D0%90%D0%94-2-%D0%BA%D1%83%D1%80%D1%81-05_1.10-30.pdf",
+      "sha256": "e2aa5322d63a3530a596db93781a832192f4e0cbe03f2ce535a4874efd6defe3",
+      "first_seen": "2026-10-26T19:30+02:00"
+    },
+    "РОЗКЛАД-3-курс-05.10-30.10.pdf": {
+      "kind": "kurs3",
+      "title": "РОЗКЛАД 3 курс 05.10-30.10",
+      "url": "http://plc.nlu.edu.ua/wp-content/uploads/2016/09/%D0%A0%D0%9E%D0%97%D0%9A%D0%9B%D0%90%D0%94-3-%D0%BA%D1%83%D1%80%D1%81-05.10-30.10.pdf",
+      "sha256": "959ac847980e6daf1e5d46b6dc4ffb2f0df4c7d9a983c9a0434a3a5a2fa78426",
+      "first_seen": "2026-10-26T19:30+02:00"
+    },
+    "Зміни-до-розкладу-16.pdf": {
+      "kind": "zminy",
+      "title": "Зміни до розкладу 16",
+      "url": "http://plc.nlu.edu.ua/wp-content/uploads/2016/09/%D0%97%D0%BC%D1%96%D0%BD%D0%B8-%D0%B4%D0%BE-%D1%80%D0%BE%D0%B7%D0%BA%D0%BB%D0%B0%D0%B4%D1%83-16.pdf",
+      "sha256": "c82bf7f83f1fb990c754f117f1b7ac2ed11a71365ad011937605b9357cc1628f",
+      "first_seen": "2026-10-26T19:30+02:00"
+    },
+    "Зміни-до-розкладу-з-19.10.pdf": {
+      "kind": "zminy",
+      "title": "Зміни до розкладу з 19.10",
+      "url": "http://plc.nlu.edu.ua/wp-content/uploads/2016/09/%D0%97%D0%BC%D1%96%D0%BD%D0%B8-%D0%B4%D0%BE-%D1%80%D0%BE%D0%B7%D0%BA%D0%BB%D0%B0%D0%B4%D1%83-%D0%B7-19.10.pdf",
+      "sha256": "beec73aea6e5e6b7fd8ed21d2851a79ce1a57dac20668066cba3905517851d4e",
+      "first_seen": "2026-10-26T19:30+02:00"
+    }
+  },
+  "events": [],
+  "current": [
+    "РОЗКЛАД-1-курс-05.10-30.10-2.pdf",
+    "РОЗКЛАД-2-курс-05_1.10-30.pdf",
+    "РОЗКЛАД-3-курс-05.10-30.10.pdf",
+    "Зміни-до-розкладу-16.pdf",
+    "Зміни-до-розкладу-з-19.10.pdf"
+  ],
+  "bootstrapped": true,
+  "last_check": "2026-10-26T19:30+02:00"
+}
