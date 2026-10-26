@@ -360,6 +360,26 @@ def build_site():
     }
     jsave(DOCS / "site.json", site)
     build_ics(sch, DOCS / "rozklad.ics")
+    build_icons()
+
+
+def build_icons():
+    """PNG-іконки для PWA з docs/icon.svg (потрібні Android/iOS)."""
+    src = DOCS / "icon.svg"
+    if not src.exists():
+        return
+    try:
+        import pymupdf
+        for size in (192, 512):
+            out = DOCS / f"icon-{size}.png"
+            if out.exists() and out.stat().st_mtime >= src.stat().st_mtime:
+                continue
+            doc = pymupdf.open(src)
+            page = doc[0]
+            zoom = size / max(page.rect.width, page.rect.height)
+            page.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom), alpha=False).save(out)
+    except Exception as e:  # noqa: BLE001
+        print(f"Іконки не створено: {e}", file=sys.stderr)
 
 
 def build_ics(sch, target):

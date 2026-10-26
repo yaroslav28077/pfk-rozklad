@@ -4,36 +4,53 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>Розклад СОБ-11 · ПФК НЮУ</title>
-  <meta name="theme-color" content="#1f3a5f">
+  <meta name="description" content="Розклад, заміни й таймер пар для групи СОБ-11 Полтавського фахового коледжу НЮУ">
+  <meta name="theme-color" content="#4338ca" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#0b1020" media="(prefers-color-scheme: dark)">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Розклад">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" type="image/svg+xml" href="icon.svg">
+  <link rel="apple-touch-icon" href="icon-192.png">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="style.css">
-  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📅</text></svg>">
 </head>
 <body>
-  <header class="top">
-    <div>
-      <h1 id="title">Розклад</h1>
-      <p class="sub" id="subtitle">завантаження…</p>
-    </div>
-    <a class="btn" id="ics" href="rozklad.ics" download>📲 У календар</a>
-  </header>
+  <div class="app">
+    <header class="top">
+      <div class="brand">
+        <div class="logo" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="18" rx="3"/><path d="M16 2v4M8 2v4M3 10h18"/><path d="M8 14h3M8 18h6"/></svg></div>
+        <div>
+          <h1 id="title">Розклад</h1>
+          <p class="sub" id="subtitle">завантаження…</p>
+        </div>
+      </div>
+      <a class="icon-btn" id="ics" href="rozklad.ics" download aria-label="Додати розклад у календар">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="18" rx="3"/><path d="M16 2v4M8 2v4M3 10h18M12 14v5M9.5 16.5h5"/></svg>
+      </a>
+    </header>
 
-  <div id="banner" class="banner hidden"></div>
+    <div id="banner" class="banner" hidden></div>
 
-  <nav class="tabs" role="tablist">
-    <button data-tab="today" class="active">Сьогодні</button>
-    <button data-tab="tomorrow">Завтра</button>
-    <button data-tab="week">Тиждень</button>
-    <button data-tab="changes">Заміни</button>
-    <button data-tab="files">PDF</button>
+    <main id="view" tabindex="-1" aria-live="polite"></main>
+
+    <footer class="foot">
+      <span id="checked"></span><br>
+      Неофіційний сайт. Джерело — PDF на <a id="src" href="#" target="_blank" rel="noopener">plc.nlu.edu.ua</a>; при розбіжностях пріоритет за оголошеннями коледжу.
+    </footer>
+  </div>
+
+  <nav class="tabbar" aria-label="Розділи">
+    <button data-tab="today" aria-label="Сьогодні"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg><span>Сьогодні</span></button>
+    <button data-tab="tomorrow" aria-label="Завтра"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6"/></svg><span>Завтра</span></button>
+    <button data-tab="week" aria-label="Тиждень"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="18" rx="3"/><path d="M16 2v4M8 2v4M3 10h18"/></svg><span>Тиждень</span></button>
+    <button data-tab="changes" aria-label="Заміни"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12a9 9 0 0 1 15.5-6.2L21 8M21 3v5h-5M21 12a9 9 0 0 1-15.5 6.2L3 16M3 21v-5h5"/></svg><span>Заміни</span><i class="dot" id="changes-dot" hidden></i></button>
+    <button data-tab="more" aria-label="Ще"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="19" cy="12" r="1.6"/></svg><span>Ще</span></button>
   </nav>
 
-  <main id="view"></main>
-
-  <footer class="foot">
-    <span id="checked"></span> ·
-    <a id="src" href="#" target="_blank" rel="noopener">сторінка розкладу коледжу</a>
-    <br><small>Неофіційний сайт. Джерело — PDF на plc.nlu.edu.ua; при розбіжностях пріоритет за офіційними оголошеннями.</small>
-  </footer>
   <script src="app.js"></script>
 </body>
 </html>
