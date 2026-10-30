@@ -2,8 +2,8 @@
   "group": "СОБ-11",
   "course": 1,
   "college": "Полтавський фаховий коледж НЮУ імені Ярослава Мудрого",
-  "generated": "2026-10-30T12:50+02:00",
-  "last_check": "2026-10-30T12:50+02:00",
+  "generated": "2026-10-30T16:31+02:00",
+  "last_check": "2026-10-30T16:31+02:00",
   "schedule": {
     "from": "2026-10-05",
     "to": "2026-10-30",
@@ -308,61 +308,27 @@
       "changes": []
     }
   ],
-  "changes": [
-    {
-      "date": "2026-10-16",
-      "pair": 3,
-      "group": "СОБ-11",
-      "subject": "вікно",
-      "teacher": "",
-      "kind": "",
-      "source": "Зміни-до-розкладу-16.pdf"
-    },
-    {
-      "date": "2026-10-19",
-      "pair": 1,
-      "group": "1 курс (9)",
-      "subject": "вікно",
-      "teacher": "",
-      "kind": "",
-      "source": "Зміни-до-розкладу-з-19.10.pdf"
-    },
-    {
-      "date": "2026-10-21",
-      "pair": 2,
-      "group": "СОБ-11",
-      "subject": "Зарубіжна література",
-      "teacher": "Варига А.В.",
-      "kind": "практичне",
-      "source": "Зміни-до-розкладу-з-19.10.pdf"
-    }
-  ],
-  "new_schedule": null,
+  "changes": [],
+  "new_schedule": {
+    "title": "РОЗКЛАД 1 курс 02.11-06",
+    "url": "http://plc.nlu.edu.ua/wp-content/uploads/2016/09/%D0%A0%D0%9E%D0%97%D0%9A%D0%9B%D0%90%D0%94-1-%D0%BA%D1%83%D1%80%D1%81-02.11-06.pdf",
+    "seen": "2026-10-30T16:31+02:00"
+  },
   "pdfs": [
     {
-      "title": "РОЗКЛАД 1 курс 05.10-30.10",
-      "url": "http://plc.nlu.edu.ua/wp-content/uploads/2016/09/%D0%A0%D0%9E%D0%97%D0%9A%D0%9B%D0%90%D0%94-1-%D0%BA%D1%83%D1%80%D1%81-05.10-30.10-2.pdf",
+      "title": "РОЗКЛАД 1 курс 02.11-06",
+      "url": "http://plc.nlu.edu.ua/wp-content/uploads/2016/09/%D0%A0%D0%9E%D0%97%D0%9A%D0%9B%D0%90%D0%94-1-%D0%BA%D1%83%D1%80%D1%81-02.11-06.pdf",
       "kind": "kurs1"
     },
     {
-      "title": "РОЗКЛАД 2 курс 05.10-30.10",
-      "url": "http://plc.nlu.edu.ua/wp-content/uploads/2016/09/%D0%A0%D0%9E%D0%97%D0%9A%D0%9B%D0%90%D0%94-2-%D0%BA%D1%83%D1%80%D1%81-05_1.10-30.pdf",
+      "title": "РОЗКЛАД 2 курс 02.11-06.11",
+      "url": "http://plc.nlu.edu.ua/wp-content/uploads/2016/09/%D0%A0%D0%9E%D0%97%D0%9A%D0%9B%D0%90%D0%94-2-%D0%BA%D1%83%D1%80%D1%81-02.11-06.11.pdf",
       "kind": "kurs2"
     },
     {
-      "title": "РОЗКЛАД 3 курс 05.10-30.10",
-      "url": "http://plc.nlu.edu.ua/wp-content/uploads/2016/09/%D0%A0%D0%9E%D0%97%D0%9A%D0%9B%D0%90%D0%94-3-%D0%BA%D1%83%D1%80%D1%81-05.10-30.10.pdf",
+      "title": "РОЗКЛАД 3 курс 02.11-06",
+      "url": "http://plc.nlu.edu.ua/wp-content/uploads/2016/09/%D0%A0%D0%9E%D0%97%D0%9A%D0%9B%D0%90%D0%94-3-%D0%BA%D1%83%D1%80%D1%81-02.11-06.pdf",
       "kind": "kurs3"
-    },
-    {
-      "title": "Зміни до розкладу 16",
-      "url": "http://plc.nlu.edu.ua/wp-content/uploads/2016/09/%D0%97%D0%BC%D1%96%D0%BD%D0%B8-%D0%B4%D0%BE-%D1%80%D0%BE%D0%B7%D0%BA%D0%BB%D0%B0%D0%B4%D1%83-16.pdf",
-      "kind": "zminy"
-    },
-    {
-      "title": "Зміни до розкладу з 19.10",
-      "url": "http://plc.nlu.edu.ua/wp-content/uploads/2016/09/%D0%97%D0%BC%D1%96%D0%BD%D0%B8-%D0%B4%D0%BE-%D1%80%D0%BE%D0%B7%D0%BA%D0%BB%D0%B0%D0%B4%D1%83-%D0%B7-19.10.pdf",
-      "kind": "zminy"
     }
   ],
   "times": {
