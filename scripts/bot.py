@@ -49,6 +49,7 @@ KEEP_DAYS = 21  # скільки днів тримати старі PDF післ
 TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
 ADMINS = [c.strip() for c in os.environ.get("TELEGRAM_CHAT_ID", "").split(",") if c.strip()]
 SITE = (os.environ.get("SITE_URL") or CFG.get("site_url") or "").rstrip("/") + "/"
+WORKER_URL = (os.environ.get("WORKER_URL") or CFG.get("worker_url") or "").rstrip("/")
 
 
 def log(*a):
@@ -384,8 +385,8 @@ class Worker:
     """Список підписників і «один раз» — живуть у Cloudflare Worker (KV). URL беремо з вебхука бота."""
 
     def __init__(self):
-        self.url = None
-        if TOKEN:
+        self.url = WORKER_URL or None
+        if TOKEN and not self.url:
             info = tg("getWebhookInfo", {}) or {}
             u = (info.get("result") or {}).get("url") or ""
             self.url = u.rstrip("/") or None
@@ -509,6 +510,17 @@ def notify(out, events, mode):
         w.call("/api/drop", {"ids": gone})
 
 
+def ensure_webhook():
+    """Направляє вебхук бота на воркер зі спільним секретом. Воркер розгортає Cloudflare Workers Builds
+    при кожному пуші в main, а вебхук ставимо звідси — тож токен Cloudflare в GitHub не потрібен."""
+    if not WORKER_URL:
+        return
+    # секрет вебхука з getWebhookInfo не прочитати, тож просто ставимо щоразу (це безпечно й дешево)
+    r = tg("setWebhook", {"url": WORKER_URL, "secret_token": secret(),
+                          "allowed_updates": ["message", "callback_query", "my_chat_member"]}) or {}
+    log(f"Вебхук → {WORKER_URL}: {'ok' if r.get('ok') else r.get('description')}")
+
+
 def setup_bot():
     """Меню команд і опис бота (раз на добу; BotFather вручну не потрібен)."""
     me = (tg("getMe", {}) or {}).get("result") or {}
@@ -549,6 +561,8 @@ def cmd_run(a):
             rec["on_page"] = True
         events = []
     out, pdfs = build(sources)
+    if TOKEN:
+        ensure_webhook()
     bot_name = setup_bot() if TOKEN else ""
     h = write_site(out, pdfs, bot_name)
     changed = h != deployed_hash()
