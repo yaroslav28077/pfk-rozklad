@@ -325,9 +325,16 @@ def lesson_line(it):
     return f"{n} {it['start']}–{it['end']}  <b>{escape(t + it['subject'])}</b>{mark}" + (f"\n      <i>{', '.join(extra)}</i>" if extra else "")
 
 
-def fmt_day(g, d, title):
+def mine(items, sg=0):
+    """Підгрупа: спільні пари + пари своєї підгрупи (sg=0 — усі)."""
+    return [i for i in items if not sg or not i.get("subgroup") or i["subgroup"] == sg]
+
+
+def fmt_day(g, d, title, sg=0):
     head = f"📅 <b>{title}: {DAYN[d.weekday()]}, {d:%d.%m}</b> · {escape(g['group'])}"
     day = g["days"].get(d.isoformat())
+    if day is not None:
+        day = {**day, "items": mine(day["items"], sg)}
     if day is None:
         return f"{head}\n😴 Вихідний" if d.weekday() >= 5 else f"{head}\n⚠️ Розклад на цю дату ще не опубліковано"
     live = [i for i in day["items"] if not i.get("cancelled")]
@@ -345,7 +352,7 @@ def plural(n):
     return "пара" if n % 10 == 1 and n % 100 != 11 else "пари" if 2 <= n % 10 <= 4 and not 12 <= n % 100 <= 14 else "пар"
 
 
-def fmt_week(g, monday):
+def fmt_week(g, monday, sg=0):
     lines = [f"🗓 <b>Тиждень {monday:%d.%m}–{monday + timedelta(days=4):%d.%m}</b> · {escape(g['group'])}"]
     for i in range(6):
         d = monday + timedelta(days=i)
@@ -354,7 +361,7 @@ def fmt_week(g, monday):
             if i < 5:
                 lines.append(f"<b>{SHORTD[i]} {d:%d.%m}</b>: ⚠️ ще не опубліковано")
             continue
-        live = [x for x in day["items"] if not x.get("cancelled")]
+        live = [x for x in mine(day["items"], sg) if not x.get("cancelled")]
         if not live:
             lines.append(f"<b>{SHORTD[i]} {d:%d.%m}</b>: пар немає 🎉"); continue
         subj = "\n".join(f"  {x['pair']}. {escape(x['subject'])}{' 🔄' if x.get('changed') else ''}" for x in live)
@@ -420,7 +427,8 @@ def broadcast(users, make_text, kb=None):
         text = make_text(u)
         if not text:
             continue
-        p = {"chat_id": u["id"], "text": text, "parse_mode": "HTML", "link_preview_options": {"is_disabled": True}}
+        p = {"chat_id": u["id"], "text": text, "parse_mode": "HTML", "link_preview_options": {"is_disabled": True},
+             "disable_notification": bool(int(u.get("s") or 0))}
         if kb:
             p["reply_markup"] = kb(u)
         r = tg("sendMessage", p) or {}
@@ -451,43 +459,61 @@ def notify(out, events, mode):
     users = w.users()
     if users is None:  # воркер ще не налаштовано — як раніше: шлемо в TELEGRAM_CHAT_ID для default_group
         log("Воркер недоступний — розсилка лише в TELEGRAM_CHAT_ID")
-        users = [{"id": c, "g": CFG.get("default_group"), "m": 1, "e": 1, "c": 1} for c in ADMINS]
+        users = [{"id": c, "g": CFG.get("default_group")} for c in ADMINS]
     else:
         known = {str(u["id"]) for u in users}
         for c in ADMINS:  # автоматично переносимо старий чат у список підписників
             if c not in known and w.once(f"migrate:{c}"):
                 w.call("/api/add", {"id": c, "g": CFG.get("default_group")})
-                users.append({"id": c, "g": CFG.get("default_group"), "m": 1, "e": 1, "c": 1})
+                users.append({"id": c, "g": CFG.get("default_group")})
     t, h = today(), now().hour
     gone = []
     G = lambda u: out.get(u.get("g") or "")  # noqa: E731
     kb = lambda u: site_kb(G(u))  # noqa: E731
+    on = lambda u, k: int(u.get(k, 1) or 0)  # noqa: E731
+    sg = lambda u: int(u.get("sg") or 0)  # noqa: E731
 
-    def due(name, hour):
-        # GitHub інколи запускає із запізненням — тож вікно 2 години, а дублі відсікає воркер (once)
-        window = (hour, hour + 1) if w.url else (hour,)
-        return mode == name or (mode == "auto" and h in window and w.once(f"{name}:{t}"))
+    def due(name, key, default):
+        """Підписники, яким саме зараз час для розсилки `name` (у кожного своя година u[key]).
+        GitHub інколи запускає із запізненням — тож вікно 2 години, а дублі відсікає воркер (once)."""
+        if mode == name:
+            return users
+        if mode != "auto":
+            return []
+        res = []
+        for slot in ((h, h - 1) if w.url else (h,)):
+            batch = [u for u in users if int(u.get(key) or default) == slot]
+            if batch and w.once(f"{name}:{t}:{slot}"):
+                res += batch
+        return res
 
-    if due("morning", CFG["morning_hour"]):
-        gone += broadcast(users, lambda u: G(u) and u.get("m", 1) and t.isoformat() in G(u)["days"]
-                          and fmt_day(G(u), t, "Сьогодні"), kb)
-    if due("evening", CFG["evening_hour"]):
-        if t.weekday() in (5, 6):  # субота/неділя ввечері — огляд наступного тижня
-            mon = t + timedelta(days=7 - t.weekday())
-            if t.weekday() == 6:
-                gone += broadcast(users, lambda u: G(u) and u.get("e", 1) and fmt_week(G(u), mon), kb)
-        else:
-            tm = t + timedelta(days=1)
-            gone += broadcast(users, lambda u: G(u) and u.get("e", 1) and tm.isoformat() in G(u)["days"]
-                              and fmt_day(G(u), tm, "Завтра"), kb)
+    batch = due("morning", "mh", CFG["morning_hour"])
+    if batch:
+        gone += broadcast(batch, lambda u: G(u) and on(u, "m") and t.isoformat() in G(u)["days"]
+                          and fmt_day(G(u), t, "Сьогодні", sg(u)), kb)
+    batch = due("evening", "eh", CFG["evening_hour"])
+    if batch:
+        tm = t + timedelta(days=1)
+        mon = t + timedelta(days=7 - t.weekday())
+
+        def evening(u):
+            g = G(u)
+            if not g:
+                return None
+            if t.weekday() == 6 and on(u, "w"):  # неділя — огляд наступного тижня
+                return fmt_week(g, mon, sg(u))
+            if t.weekday() != 5 and on(u, "e") and tm.isoformat() in g["days"]:
+                return fmt_day(g, tm, "Завтра", sg(u))
+            return None
+        gone += broadcast(batch, evening, kb)
     if mode == "weekly":
         mon = t - timedelta(days=t.weekday()) if t.weekday() < 5 else t + timedelta(days=7 - t.weekday())
-        gone += broadcast(users, lambda u: G(u) and fmt_week(G(u), mon), kb)
+        gone += broadcast(users, lambda u: G(u) and fmt_week(G(u), mon, sg(u)), kb)
     for e in events:
         if e["type"] == "changes":
             def txt(u, e=e):
                 g = G(u)
-                if not g or not u.get("c", 1):
+                if not g or not on(u, "c"):
                     return None
                 mine = [z for z in e["rows"] if g["group"] in parse.change_targets(z["group"], [{"name": g["group"], "course": g["course"]}])]
                 if not mine:
@@ -501,8 +527,8 @@ def notify(out, events, mode):
             d0 = date.fromisoformat(e["from"])
             mon = d0 - timedelta(days=d0.weekday())
             word = "Оновлено розклад" if e.get("changed") else "Новий розклад"
-            gone += broadcast(users, lambda u, e=e: G(u) and G(u)["course"] == e["course"] and u.get("c", 1)
-                              and f"🆕 <b>{word}</b> ({date.fromisoformat(e['from']):%d.%m}–{date.fromisoformat(e['to']):%d.%m})\n\n" + fmt_week(G(u), mon), kb)
+            gone += broadcast(users, lambda u, e=e: G(u) and G(u)["course"] == e["course"] and on(u, "c")
+                              and f"🆕 <b>{word}</b> ({date.fromisoformat(e['from']):%d.%m}–{date.fromisoformat(e['to']):%d.%m})\n\n" + fmt_week(G(u), mon, sg(u)), kb)
         elif e["type"] == "error" and ADMINS:
             for c in ADMINS:
                 tg("sendMessage", {"chat_id": c, "text": f"⚠️ {e['text']}\n{e.get('url', '')}"})
@@ -538,6 +564,8 @@ def setup_bot():
     tg("setMyDescription", {"description": f"Розклад усіх груп {CFG.get('short', '')}: пари на сьогодні й завтра, тиждень, заміни. "
                                            "Натисни «Почати» й обери свою групу. Дані — з plc.nlu.edu.ua."})
     tg("setMyShortDescription", {"short_description": f"Розклад і заміни всіх груп · {CFG.get('short', '')}"})
+    if SITE.startswith("https://"):  # кнопка «Розклад» біля поля вводу — сайт як Mini App
+        tg("setChatMenuButton", {"menu_button": {"type": "web_app", "text": "Розклад", "web_app": {"url": SITE}}})
     return me.get("username", "")
 
 
