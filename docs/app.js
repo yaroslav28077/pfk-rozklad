@@ -1,7 +1,8 @@
-/* Розклад ПФК — клієнтська частина. Дані: site.json (генерує scripts/bot.py). */
+/* Розклад ПФК — клієнтська частина. Дані: data/index.json + data/g/<група>.json (генерує scripts/bot.py). */
 const DAYS = ["Неділя", "Понеділок", "Вівторок", "Середа", "Четвер", "П'ятниця", "Субота"];
 const SHORT = ["Нд", "Пн", "Вт", "Ср", "Чт", "Пт", "Сб"];
-let SITE = null;
+let SITE = null;   // дані обраної групи
+let INDEX = null;  // список курсів і груп
 let TAB = location.hash.replace("#", "") || "today";
 let WEEK_SEL = null;
 
@@ -77,7 +78,11 @@ function dur(s) {
   const h = Math.floor(s / 60), m = s % 60;
   return h ? `${h} год ${m} хв` : `${m} хв`;
 }
-function findDay(iso) { return SITE.days.find((d) => d.date === iso) || { date: iso, items: [], error: "Немає даних на цю дату" }; }
+function findDay(iso) {
+  const d = SITE.days[iso];
+  if (d) return { date: iso, items: d.items };
+  return { date: iso, items: [], error: [0, 6].includes(dow(iso)) ? null : "Розклад на цю дату ще не опубліковано" };
+}
 const live = (day) => (day.items || []).filter((i) => !i.cancelled);
 
 /* ---------- компоненти ---------- */
@@ -89,7 +94,7 @@ function lessonHTML(it, state) {
   if (it.cancelled) cls.push("cancelled");
   const chip = it.type ? `<span class="chip ${it.type === "Лк" ? "lk" : "pr"}">${it.type === "Лк" ? "Лекція" : it.type === "Пр" ? "Практичне" : esc(it.type)}</span>` : "";
   const room = it.room ? (/^\d+$/.test(it.room) ? `ауд. ${esc(it.room)}` : esc(it.room)) : "";
-  const info = [it.teacher ? esc(it.teacher) : "", room].filter(Boolean).map((x) => `<span>${x}</span>`).join("");
+  const info = [it.subgroup ? `${it.subgroup} підгр.` : "", it.teacher ? esc(it.teacher) : "", it.online ? "онлайн" : room].filter(Boolean).map((x) => `<span>${x}</span>`).join("");
   let note = "";
   if (it.cancelled) note = `<div class="note">Вікно — пари немає</div>`;
   else if (it.changed) note = `<div class="note">Заміна${it.was ? ` · було: ${esc(it.was)}` : ""}</div>`;
@@ -103,8 +108,8 @@ function lessonHTML(it, state) {
 
 function dayListHTML(day, isToday) {
   const wd = dow(day.date);
-  if (wd === 0 || wd === 6) return `<div class="empty">${svg("coffee")}Вихідний — відпочивай</div>`;
-  if (day.error) return `<div class="empty">${svg("file")}${esc(day.error)}<br><small>Дивись PDF у розділі «Ще»</small></div>`;
+  if ((wd === 0 || wd === 6) && !day.items.length) return `<div class="empty">${svg("coffee")}Вихідний — відпочивай</div>`;
+  if (day.error) return `<div class="empty">${svg("file")}${esc(day.error)}<br><small>Щойно коледж його викладе — він з'явиться тут сам</small></div>`;
   if (!day.items.length) return `<div class="empty">${svg("check")}Пар немає</div>`;
   const now = kyivNow().sec;
   const out = [];
@@ -125,7 +130,7 @@ function heroHTML(day) {
   const wd = dow(day.date);
   const L = live(day);
   const now = kyivNow().sec;
-  if (wd === 0 || wd === 6 || day.error || !L.length) {
+  if (day.error || !L.length) {
     const nextIso = nextSchoolDay(1);
     const nd = findDay(nextIso);
     const first = live(nd)[0];
@@ -189,24 +194,33 @@ function render() {
     v.querySelectorAll("[data-day]").forEach((b) => b.addEventListener("click", () => { WEEK_SEL = b.dataset.day; render(); }));
   } else if (TAB === "changes") {
     const rows = SITE.changes.filter((z) => z.date >= addDays(today, -7)).sort((a, b) => (a.date + a.pair).localeCompare(b.date + b.pair));
-    v.innerHTML = `<div class="section-title"><h2>Заміни</h2><span>${esc(SITE.group)} + весь курс</span></div>` +
+    v.innerHTML = `<div class="section-title"><h2>Заміни</h2><span>${esc(SITE.group)}</span></div>` +
       (rows.length ? `<div class="list">${rows.map((z) => {
         const win = z.subject.toLowerCase() === "вікно";
         return `<div class="change ${win ? "win" : ""} ${z.date < today ? "past" : ""} fade"><div class="d">${ddmm(z.date)}<small>${SHORT[dow(z.date)]} · ${z.pair} п.</small></div>
-          <div class="body"><b>${win ? "Вікно — пари немає" : esc(z.subject)}</b><span>${[z.teacher, z.kind, z.group].filter(Boolean).map(esc).join(" · ")}</span></div></div>`;
+          <div class="body"><b>${win ? "Вікно — пари немає" : esc(z.subject)}</b><span>${[z.teacher, z.kind, z.group !== SITE.group ? z.group : ""].filter(Boolean).map(esc).join(" · ")}</span></div></div>`;
       }).join("")}</div>` : `<div class="empty">${svg("check")}Замін немає</div>`) +
       `<p class="muted" style="margin:12px 2px">Минулі заміни показуються блідими ще тиждень.</p>`;
+  } else if (TAB === "pick") {
+    v.innerHTML = pickerHTML();
+    v.querySelectorAll("[data-group]").forEach((b) => b.addEventListener("click", () => selectGroup(b.dataset.group)));
+    return;
   } else {
+    const ics = `ics/${SITE.slug}.ics`;
+    const webcal = new URL(ics, location.href).href.replace(/^https?:/, "webcal:");
+    const pdfs = INDEX.pdfs.filter((p) => p.kind === "changes" || p.course === SITE.course);
     v.innerHTML = `<div class="section-title"><h2>Ще</h2></div>
       <div class="card">
-        <a class="link-row" href="rozklad.ics" download>${svg("cal")}<div>Додати в календар<small>Google Calendar / iPhone — усі пари з нагадуваннями</small></div></a>
+        <a class="link-row" href="#pick" id="change-group">${svg("users")}<div>Змінити групу<small>Зараз: ${esc(SITE.group)}, ${SITE.course} курс</small></div></a>
+        ${INDEX.bot ? `<a class="link-row" href="https://t.me/${esc(INDEX.bot)}?start=${esc(SITE.slug)}" target="_blank" rel="noopener">${svg("bot")}<div>Telegram-бот<small>Розклад ${esc(SITE.group)} щоранку й заміни одразу</small></div></a>` : ""}
+        <a class="link-row" href="${esc(webcal)}">${svg("cal")}<div>Підписатися в календарі<small>Google Calendar / iPhone — оновлюється сам</small></div></a>
+        <a class="link-row" href="${esc(ics)}" download>${svg("file")}<div>Завантажити .ics<small>Разовий імпорт у календар</small></div></a>
         <a class="link-row" href="#" id="install">${svg("phone")}<div>Встановити як застосунок<small id="install-hint">Іконка на головному екрані телефону</small></div></a>
-        <a class="link-row" href="${esc(SITE.source_page)}" target="_blank" rel="noopener">${svg("ext")}<div>Сторінка розкладу коледжу<small>plc.nlu.edu.ua</small></div></a>
+        <a class="link-row" href="${esc(INDEX.source_page)}" target="_blank" rel="noopener">${svg("ext")}<div>Сторінка розкладу коледжу<small>plc.nlu.edu.ua</small></div></a>
       </div>
       <div class="section-title"><h2>PDF на сайті коледжу</h2></div>
-      <div class="card">${SITE.pdfs.map((p) => `<a class="link-row" href="${esc(p.url)}" target="_blank" rel="noopener">${svg("file")}<div>${esc(p.title)}</div></a>`).join("") || '<p class="muted">Немає</p>'}</div>
-      <div class="section-title"><h2>Колонка ${esc(SITE.group)} з PDF</h2></div>
-      <div class="card"><p class="muted" style="margin:0">Фрагмент останнього PDF розкладу курсу — для звірки.</p><img class="preview" src="novyi_rozklad.png" alt="Фрагмент PDF розкладу" loading="lazy" onerror="this.remove()"></div>`;
+      <div class="card">${pdfs.map((p) => `<a class="link-row" href="${esc(p.url)}" target="_blank" rel="noopener">${svg("file")}<div>${esc(p.title)}</div></a>`).join("") || '<p class="muted">Немає</p>'}</div>`;
+    $("#change-group").addEventListener("click", (e) => { e.preventDefault(); TAB = "pick"; render(); });
     setupInstall();
   }
 }
@@ -239,31 +253,59 @@ function tick() {
   if (rerender) render();
 }
 
+/* ---------- вибір групи ---------- */
+function pickerHTML() {
+  return `<div class="section-title"><h2>Обери свою групу</h2></div>` + Object.entries(INDEX.courses).map(([c, gs]) =>
+    `<div class="section-title"><h2>${esc(c)} курс</h2></div><div class="days pick">${gs.map((g) =>
+      `<button data-group="${esc(g.name)}" class="${SITE && SITE.group === g.name ? "active" : ""}">${esc(g.name)}${g.room ? `<small>${esc(g.room)} ауд.</small>` : ""}</button>`).join("")}</div>`).join("");
+}
+function groupByName(name) {
+  for (const gs of Object.values(INDEX.courses)) for (const g of gs) if (g.name === name || g.slug === name) return g;
+  return null;
+}
+async function selectGroup(name) {
+  const g = groupByName(name);
+  if (!g) { TAB = "pick"; render(); return; }
+  try {
+    SITE = await (await fetch(`data/g/${g.slug}.json?` + (INDEX.hash || Date.now()), { cache: "no-cache" })).json();
+  } catch (e) {
+    $("#view").innerHTML = `<div class="empty">${svg("file")}Не вдалося завантажити розклад. Перевір інтернет і онови сторінку.</div>`;
+    return;
+  }
+  localStorage.setItem("group", g.name);
+  const u = new URL(location.href); u.searchParams.set("g", g.name); history.replaceState(null, "", u.pathname + u.search + location.hash);
+  $("#title").textContent = `Розклад ${SITE.group}`;
+  document.title = `Розклад ${SITE.group} · ${INDEX.short || "ПФК НЮУ"}`;
+  $("#subtitle").textContent = `${SITE.course} курс · ${INDEX.short || "ПФК НЮУ"}${SITE.room ? ` · ${SITE.room} ауд.` : ""}`;
+  $("#ics").href = `ics/${SITE.slug}.ics`;
+  const today = kyivNow().iso;
+  const banner = $("#banner");
+  const weekDays = [0, 1, 2, 3, 4].map((i) => addDays(addDays(today, dow(today) === 0 ? -6 : 1 - dow(today)), i));
+  if (!weekDays.some((d) => SITE.days[d])) { banner.innerHTML = "Розклад на цей тиждень ще не опубліковано — щойно коледж його викладе, він з'явиться тут сам."; banner.hidden = false; }
+  else banner.hidden = true;
+  $("#changes-dot").hidden = !SITE.changes.some((z) => z.date >= today);
+  if (TAB === "pick") TAB = "today";
+  render();
+}
+
 async function init() {
   try {
-    SITE = await (await fetch("site.json?" + Date.now(), { cache: "no-store" })).json();
+    INDEX = await (await fetch("data/index.json?" + Date.now(), { cache: "no-store" })).json();
   } catch (e) {
     $("#view").innerHTML = `<div class="empty">${svg("file")}Не вдалося завантажити дані. Перевір інтернет і онови сторінку.</div>`;
     return;
   }
-  $("#title").textContent = `Розклад ${SITE.group}`;
-  document.title = `Розклад ${SITE.group} · ПФК НЮУ`;
-  const s = SITE.schedule;
-  $("#subtitle").textContent = `${SITE.course} курс · ПФК НЮУ${s.from ? ` · діє ${ddmm(s.from)}–${ddmm(s.to)}` : ""}`;
-  $("#checked").textContent = SITE.last_check ? `Сайт коледжу перевірено ${SITE.last_check.slice(8, 10)}.${SITE.last_check.slice(5, 7)} о ${SITE.last_check.slice(11, 16)}` : "";
-  $("#src").href = SITE.source_page;
-  const today = kyivNow().iso;
-  const msgs = [];
-  if (SITE.new_schedule) msgs.push(`На сайті коледжу новий розклад: «${esc(SITE.new_schedule.title)}». Тут поки старий — <a href="${esc(SITE.new_schedule.url)}" target="_blank" rel="noopener">відкрити PDF</a>.`);
-  if (s.to && today > s.to) msgs.push(`Розклад діяв до ${ddmm(s.to)}. Новий ще не внесено — дивись PDF у розділі «Ще».`);
-  if (msgs.length) { $("#banner").innerHTML = msgs.join("<br>"); $("#banner").hidden = false; }
-  if (SITE.changes.some((z) => z.date >= today)) $("#changes-dot").hidden = false;
+  $("#checked").textContent = INDEX.updated ? `Дані оновлено ${INDEX.updated.slice(8, 10)}.${INDEX.updated.slice(5, 7)} о ${INDEX.updated.slice(11, 16)}` : "";
+  $("#src").href = INDEX.source_page;
   document.querySelectorAll(".tabbar button").forEach((b) => b.addEventListener("click", () => {
-    TAB = b.dataset.tab; history.replaceState(null, "", "#" + TAB); render(); window.scrollTo({ top: 0, behavior: "smooth" });
+    if (!SITE) return;
+    TAB = b.dataset.tab; history.replaceState(null, "", location.pathname + location.search + "#" + TAB); render(); window.scrollTo({ top: 0, behavior: "smooth" });
   }));
   if (!["today", "tomorrow", "week", "changes", "more"].includes(TAB)) TAB = "today";
-  render();
-  setInterval(tick, 20000);
-  document.addEventListener("visibilitychange", () => { if (!document.hidden) render(); });
+  const wanted = new URLSearchParams(location.search).get("g") || localStorage.getItem("group");
+  if (wanted && groupByName(wanted)) await selectGroup(wanted);
+  else { TAB = "pick"; $("#subtitle").textContent = INDEX.short || "ПФК НЮУ"; render(); }
+  setInterval(() => SITE && tick(), 20000);
+  document.addEventListener("visibilitychange", () => { if (!document.hidden && SITE) render(); });
 }
 init();

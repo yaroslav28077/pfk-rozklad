@@ -98,6 +98,7 @@ h1 { margin: 0; font-size: 1.35rem; font-weight: 800; letter-spacing: -.01em; }
 .days button.active small { color: var(--on-primary); opacity: .85; }
 .days button.today:not(.active) { border-color: var(--primary); }
 .days button:active { transform: scale(.96); }
+.days.pick { grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)); }
 
 /* заміни */
 .change { display: flex; gap: 12px; align-items: flex-start; background: var(--card); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 12px; box-shadow: var(--shadow); }
