@@ -1,6 +1,6 @@
 // Cloudflare Worker: Telegram-бот розкладу для всіх груп ПФК НЮУ (безкоштовний тариф).
-// Прив'язки (див. wrangler.json і .github/workflows/worker.yml — налаштовуються автоматично):
-//   BOT_TOKEN (secret) — токен бота; SITE_URL (var) — адреса сайту на GitHub Pages; USERS (KV) — підписники.
+// Розгортає Cloudflare Workers Builds при кожному пуші в main; прив'язки — у wrangler.json (KV створюється сам):
+//   BOT_TOKEN (secret, задається в Cloudflare: Settings → Variables and Secrets) — токен бота; SITE_URL (var) — адреса сайту на GitHub Pages; USERS (KV) — підписники.
 // Підписник = ключ "u:<chat id>" у KV, у metadata: { g: "СОБ-11", m: 1 (ранок), e: 1 (вечір), c: 1 (заміни) }.
 
 const DAYS = ["Неділя", "Понеділок", "Вівторок", "Середа", "Четвер", "П'ятниця", "Субота"];

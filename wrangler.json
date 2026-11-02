@@ -3,6 +3,15 @@
   "main": "worker/worker.js",
   "compatibility_date": "2025-10-01",
   "workers_dev": true,
-  "observability": { "enabled": true },
-  "kv_namespaces": []
+  "observability": {
+    "enabled": true
+  },
+  "kv_namespaces": [
+    {
+      "binding": "USERS"
+    }
+  ],
+  "vars": {
+    "SITE_URL": "https://yaroslav28077.github.io/pfk-rozklad/"
+  }
 }

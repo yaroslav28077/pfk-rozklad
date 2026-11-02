@@ -6,5 +6,6 @@
   "bells": {"1": ["08:00", "09:20"], "2": ["09:30", "10:50"], "3": ["11:00", "12:15"], "4": ["12:45", "14:00"], "5": ["14:10", "15:30"], "6": ["15:40", "17:00"]},
   "morning_hour": 6,
   "evening_hour": 18,
-  "default_group": "СОБ-11"
+  "default_group": "СОБ-11",
+  "worker_url": "https://pfk-rozklad.yaroslav28077.workers.dev"
 }
