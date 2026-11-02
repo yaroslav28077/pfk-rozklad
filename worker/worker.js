@@ -14,9 +14,20 @@ const kyivISO = () => new Intl.DateTimeFormat("en-CA", { timeZone: "Europe/Kyiv"
 const mondayOf = (iso) => addDays(iso, dow(iso) === 0 ? -6 : 1 - dow(iso));
 const norm = (s) => String(s || "").toUpperCase().replace(/[\s\-–'’ʼ]/g, "").replace(/I/g, "І").replace(/C/g, "С").replace(/O/g, "О").replace(/P/g, "Р").replace(/K/g, "К").replace(/A/g, "А").replace(/E/g, "Е");
 const plural = (n) => (n % 10 === 1 && n % 100 !== 11 ? "пара" : n % 10 >= 2 && n % 10 <= 4 && !(n % 100 >= 12 && n % 100 <= 14) ? "пари" : "пар");
-const DEFAULTS = { m: 1, e: 1, c: 1 };
+// m/e/c/w — ранок/вечір/заміни/огляд тижня (1/0); mh/eh — година ранкової/вечірньої розсилки; s — беззвучно; sg — підгрупа (0 = усі)
+const DEFAULTS = { m: 1, e: 1, c: 1, w: 1, s: 0, sg: 0, mh: 6, eh: 18 };
+const MORNING_HOURS = [6, 7, 8, 9];
+const EVENING_HOURS = [17, 18, 19, 20, 21];
+const hh = (h) => String(h).padStart(2, "0") + ":00";
 
-const MENU = { keyboard: [[{ text: "📅 Сьогодні" }, { text: "➡️ Завтра" }], [{ text: "🗓 Тиждень" }, { text: "🔄 Заміни" }], [{ text: "⚙️ Налаштування" }, { text: "ℹ️ Допомога" }]], resize_keyboard: true, is_persistent: true };
+const MENU = {
+  keyboard: [
+    [{ text: "📅 Сьогодні", style: "primary" }, { text: "➡️ Завтра", style: "primary" }],
+    [{ text: "🗓 Тиждень" }, { text: "🔄 Заміни" }],
+    [{ text: "⚙️ Налаштування" }],
+  ],
+  resize_keyboard: true, is_persistent: true, input_field_placeholder: "Обери кнопку або напиши назву групи",
+};
 
 async function secretOf(token) {
   const h = await crypto.subtle.digest("SHA-256", new TextEncoder().encode("pfk-rozklad:" + token));
@@ -38,7 +49,12 @@ async function getUser(env, id) {
   const r = await env.USERS.getWithMetadata("u:" + id);
   return r.metadata ? { ...DEFAULTS, ...r.metadata } : null;
 }
-const saveUser = (env, id, u) => env.USERS.put("u:" + id, "", { metadata: { g: u.g, m: u.m ? 1 : 0, e: u.e ? 1 : 0, c: u.c ? 1 : 0 } });
+const bit = (v) => (v ? 1 : 0);
+const saveUser = (env, id, u) => env.USERS.put("u:" + id, "", { metadata: {
+  g: u.g, m: bit(u.m), e: bit(u.e), c: bit(u.c), w: bit(u.w), s: bit(u.s), sg: +u.sg || 0, mh: +u.mh || DEFAULTS.mh, eh: +u.eh || DEFAULTS.eh } });
+// підгрупа: показуємо спільні пари і пари своєї підгрупи
+const mine = (items, sg) => (sg ? items.filter((x) => !x.subgroup || x.subgroup === sg) : items);
+const hasSubgroups = (g) => Object.values(g.days).some((d) => d.items.some((x) => x.subgroup));
 
 // ---------------------------------------------------------------- тексти
 function lessonLine(it) {
@@ -48,9 +64,10 @@ function lessonLine(it) {
   return `${n} ${it.start}–${it.end}  <b>${esc(((it.type || "") + " " + it.subject).trim())}</b>${it.changed ? " 🔄" : ""}` + (extra.length ? `\n      <i>${extra.join(", ")}</i>` : "");
 }
 
-function fmtDay(g, iso, title) {
+function fmtDay(g, iso, title, sg = 0) {
   const head = `📅 <b>${title}: ${DAYS[dow(iso)]}, ${ddmm(iso)}</b> · ${esc(g.group)}`;
-  const day = g.days[iso];
+  const day0 = g.days[iso];
+  const day = day0 && { ...day0, items: mine(day0.items, sg) };
   if (!day) return [0, 6].includes(dow(iso)) ? `${head}\n😴 Вихідний` : `${head}\n⚠️ Розклад на цю дату ще не опубліковано`;
   if (!day.items.length) return `${head}\nПар немає 🎉`;
   const live = day.items.filter((x) => !x.cancelled);
@@ -60,13 +77,13 @@ function fmtDay(g, iso, title) {
   return out.join("\n");
 }
 
-function fmtWeek(g, monday) {
+function fmtWeek(g, monday, sg = 0) {
   const out = [`🗓 <b>Тиждень ${ddmm(monday)}–${ddmm(addDays(monday, 4))}</b> · ${esc(g.group)}`];
   for (let i = 0; i < 6; i++) {
     const iso = addDays(monday, i);
     const day = g.days[iso];
     if (!day) { if (i < 5) out.push(`<b>${SHORT[dow(iso)]} ${ddmm(iso)}</b>: ⚠️ ще не опубліковано`); continue; }
-    const L = day.items.filter((x) => !x.cancelled);
+    const L = mine(day.items, sg).filter((x) => !x.cancelled);
     if (!L.length) out.push(`<b>${SHORT[dow(iso)]} ${ddmm(iso)}</b>: пар немає 🎉`);
     else out.push(`<b>${SHORT[dow(iso)]} ${ddmm(iso)}</b> · ${L[0].start}–${L[L.length - 1].end}\n` + L.map((x) => `  ${x.pair}. ${esc(x.subject)}${x.changed ? " 🔄" : ""}`).join("\n"));
   }
@@ -79,7 +96,15 @@ function fmtChanges(g) {
   return `🔄 <b>Заміни</b> · ${esc(g.group)}\n\n` + rows.map((z) => `• ${ddmm(z.date)} (${SHORT[dow(z.date)]}), ${z.pair} пара: ${z.subject.toLowerCase() === "вікно" ? "<b>вікно</b>" : esc(z.subject + (z.teacher ? ", " + z.teacher : ""))}`).join("\n");
 }
 
-const helpText = (u, chatId) => `Я бот розкладу <b>усіх груп ПФК НЮУ</b> 👋\n\n${u ? `Твоя група: <b>${esc(u.g)}</b> (змінити — /group)` : "Спершу обери групу — /group"}\n\n📅 Сьогодні · ➡️ Завтра · 🗓 Тиждень · 🔄 Заміни — кнопки внизу.\n\nСам пишу:\n🌅 зранку — пари на сьогодні\n🌆 о 18:00 — пари на завтра (у неділю — тиждень)\n🔔 одразу — нові заміни й новий розклад\nУвімкнути/вимкнути — ⚙️ Налаштування.\n\nПрацює і в груповому чаті: додай мене в чат і обери групу там.\n\n<code>${chatId}</code>`;
+const helpText = (u, chatId) => [
+  `Я бот розкладу <b>усіх груп ПФК НЮУ</b> 👋`,
+  u ? `👥 Твоя група: <b>${esc(u.g)}</b>` : "👥 Спершу обери групу — /group",
+  `<b>Кнопки внизу</b>\n📅 Сьогодні · ➡️ Завтра · 🗓 Тиждень · 🔄 Заміни`,
+  `<b>Сам пишу</b>\n🌅 зранку — пари на сьогодні\n🌆 увечері — пари на завтра\n🗓 у неділю — огляд тижня\n🔔 одразу — нові заміни й новий розклад`,
+  `Час, підгрупу й беззвучний режим — у ⚙️ <b>Налаштуваннях</b>.`,
+  `Працюю і в груповому чаті: додай мене в чат і надішли /group.`,
+  `<code>${chatId}</code>`,
+].join("\n\n");
 
 // ---------------------------------------------------------------- клавіатури
 function coursesKb(index) {
@@ -94,31 +119,68 @@ function groupsKb(index, course) {
   return { inline_keyboard: rows };
 }
 const schoolDay = (iso, step) => { let d = addDays(iso, step); while ([0, 6].includes(dow(d))) d = addDays(d, step); return d; };
+// рядок «Пн 02 · Вт 03 …» — швидкий перехід між днями тижня; обраний день підсвічено
+function weekChips(monday, selected) {
+  const today = kyivISO();
+  return [0, 1, 2, 3, 4].map((i) => {
+    const iso = addDays(monday, i);
+    const label = `${SHORT[dow(iso)]} ${iso.slice(8, 10)}${iso === today ? " •" : ""}`;
+    return { text: label, callback_data: "d:" + iso, ...(iso === selected ? { style: "primary" } : {}) };
+  });
+}
 function dayKb(env, g, iso) {
   const today = kyivISO();
   return { inline_keyboard: [
-    [{ text: "◀️", callback_data: "d:" + schoolDay(iso, -1) }, { text: iso === today ? "• Сьогодні •" : "Сьогодні", callback_data: "d:" + today }, { text: "▶️", callback_data: "d:" + schoolDay(iso, 1) }],
+    weekChips(mondayOf(iso), iso),
+    [{ text: "◀️", callback_data: "d:" + schoolDay(iso, -1) }, { text: iso === today ? "📅 Сьогодні" : "↩️ Сьогодні", callback_data: "d:" + today }, { text: "▶️", callback_data: "d:" + schoolDay(iso, 1) }],
     [{ text: "🗓 Тиждень", callback_data: "w:" + mondayOf(iso) }, { text: "🔄 Заміни", callback_data: "changes" }, { text: "🌐 Сайт", url: siteLink(env, g) }],
   ] };
 }
 function weekKb(env, g, monday) {
   return { inline_keyboard: [
-    [{ text: "◀️ Тиждень", callback_data: "w:" + addDays(monday, -7) }, { text: "Тиждень ▶️", callback_data: "w:" + addDays(monday, 7) }],
+    weekChips(monday, null),
+    [{ text: "◀️ Попередній", callback_data: "w:" + addDays(monday, -7) }, { text: "Наступний ▶️", callback_data: "w:" + addDays(monday, 7) }],
     [{ text: "📅 Сьогодні", callback_data: "d:" + kyivISO() }, { text: "🌐 Сайт", url: siteLink(env, g) }],
   ] };
 }
 const backKb = (env, g) => ({ inline_keyboard: [[{ text: "📅 Сьогодні", callback_data: "d:" + kyivISO() }, { text: "➡️ Завтра", callback_data: "d:" + schoolDay(kyivISO(), 1) }], [{ text: "🌐 Сайт", url: siteLink(env, g) }]] });
 const siteLink = (env, g) => (env.SITE_URL.endsWith("/") ? env.SITE_URL : env.SITE_URL + "/") + "?g=" + encodeURIComponent(g.group);
-const onoff = (v) => (v ? "✅" : "❌");
-function settingsKb(u) {
-  return { inline_keyboard: [
-    [{ text: `👥 Група: ${u.g} — змінити`, callback_data: "courses" }],
-    [{ text: `${onoff(u.m)} Зранку — пари на сьогодні`, callback_data: "s:m" }],
-    [{ text: `${onoff(u.e)} Ввечері — пари на завтра`, callback_data: "s:e" }],
-    [{ text: `${onoff(u.c)} Нові заміни й розклад`, callback_data: "s:c" }],
-    [{ text: "🚫 Відписатися від бота", callback_data: "stop" }],
-  ] };
+const toggle = (on, label, data) => ({ text: `${on ? "✅" : "▫️"} ${label}`, callback_data: data, ...(on ? { style: "success" } : {}) });
+function settingsText(u, g) {
+  const sub = g && hasSubgroups(g) ? ` · ${u.sg ? u.sg + " підгрупа" : "усі підгрупи"}` : "";
+  const line = (on, icon, text) => `${on ? "✅" : "▫️"} ${icon} ${text}`;
+  return [
+    `⚙️ <b>Налаштування</b>`,
+    `👥 <b>${esc(u.g)}</b>${g ? ` · ${g.course} курс` : ""}${sub}`,
+    [
+      `<b>Що й коли надсилати</b>`,
+      line(u.m, "🌅", `Зранку о ${hh(u.mh)} — пари на сьогодні`),
+      line(u.e, "🌆", `Увечері о ${hh(u.eh)} — пари на завтра`),
+      line(u.w, "🗓", `У неділю — огляд тижня`),
+      line(u.c, "🔔", `Одразу — нові заміни й розклад`),
+      `${u.s ? "🔕 Беззвучно" : "🔔 Зі звуком"}`,
+    ].join("\n"),
+    `<i>Бот запускається щогодини, тож повідомлення може прийти на кілька хвилин пізніше.</i>`,
+  ].join("\n\n");
 }
+function settingsKb(u, g) {
+  const rows = [[{ text: "👥 Змінити групу", callback_data: "courses" }]];
+  if (g && hasSubgroups(g)) rows[0].push({ text: `👤 ${u.sg ? u.sg + " підгрупа" : "Усі підгрупи"}`, callback_data: "s:sg" });
+  rows.push(
+    [toggle(u.m, "Ранок", "s:m"), { text: `⏰ ${hh(u.mh)}`, callback_data: "t:mh" }],
+    [toggle(u.e, "Вечір", "s:e"), { text: `⏰ ${hh(u.eh)}`, callback_data: "t:eh" }],
+    [toggle(u.w, "Тиждень у неділю", "s:w"), toggle(u.c, "Заміни", "s:c")],
+    [{ text: u.s ? "🔕 Беззвучно" : "🔔 Зі звуком", callback_data: "s:s" }],
+    [{ text: "ℹ️ Допомога", callback_data: "help" }, { text: "🚫 Відписатися", callback_data: "stop?", style: "danger" }],
+  );
+  return { inline_keyboard: rows };
+}
+function hoursKb(u, key) {
+  const hours = key === "mh" ? MORNING_HOURS : EVENING_HOURS;
+  const btn = (h) => ({ text: hh(h), callback_data: `h:${key}:${h}`, ...(+u[key] === h ? { style: "primary" } : {}) });
+  return { inline_keyboard: [hours.map(btn), [{ text: "◀️ Назад", callback_data: "settings" }]] };
+}
+const stopKb = { inline_keyboard: [[{ text: "Так, відписатися", callback_data: "stop", style: "danger" }, { text: "◀️ Ні, назад", callback_data: "settings" }]] };
 
 // ---------------------------------------------------------------- Telegram
 async function tg(env, method, body) {
@@ -142,29 +204,41 @@ function keyFromText(t) {
   return null;
 }
 
-function view(env, g, key) {
+function view(env, g, key, sg = 0) {
   const today = kyivISO();
-  if (key.startsWith("d:")) { const iso = key.slice(2); return [fmtDay(g, iso, iso === today ? "Сьогодні" : iso === addDays(today, 1) ? "Завтра" : "День"), dayKb(env, g, iso)]; }
-  if (key === "today") return [fmtDay(g, today, "Сьогодні"), dayKb(env, g, today)];
-  if (key === "tomorrow") { const iso = schoolDay(today, 1); return [fmtDay(g, iso, iso === addDays(today, 1) ? "Завтра" : "Наступний навчальний день"), dayKb(env, g, iso)]; }
+  if (key.startsWith("d:")) { const iso = key.slice(2); return [fmtDay(g, iso, iso === today ? "Сьогодні" : iso === addDays(today, 1) ? "Завтра" : "День", sg), dayKb(env, g, iso)]; }
+  if (key === "today") return [fmtDay(g, today, "Сьогодні", sg), dayKb(env, g, today)];
+  if (key === "tomorrow") { const iso = schoolDay(today, 1); return [fmtDay(g, iso, iso === addDays(today, 1) ? "Завтра" : "Наступний навчальний день", sg), dayKb(env, g, iso)]; }
   if (key === "week" || key.startsWith("w:")) {
     const mon = key.startsWith("w:") ? key.slice(2) : [0, 6].includes(dow(today)) ? mondayOf(addDays(today, 2)) : mondayOf(today);
-    return [fmtWeek(g, mon), weekKb(env, g, mon)];
+    return [fmtWeek(g, mon, sg), weekKb(env, g, mon)];
   }
   if (key === "changes") return [fmtChanges(g), backKb(env, g)];
   return null;
+}
+
+// кнопка «Меню» біля поля вводу відкриває сайт розкладу своєї групи прямо в Telegram (Mini App)
+const setMenuButton = (env, chatId, g) => tg(env, "setChatMenuButton", { chat_id: chatId, menu_button: { type: "web_app", text: "Розклад", web_app: { url: siteLink(env, { group: g.name }) } } });
+
+async function showSettings(env, chatId, index, user, msg) {
+  const g = findGroup(index, user.g);
+  const data = g ? await getJSON(env, `data/g/${g.slug}.json`).catch(() => null) : null;
+  const text = settingsText(user, data), kb = settingsKb(user, data);
+  return msg ? edit(env, msg, text, kb) : send(env, chatId, text, kb);
 }
 
 async function chooseGroup(env, chatId, index, user, slugOrName, msg) {
   const g = findGroup(index, slugOrName);
   if (!g) return false;
   const u = { ...DEFAULTS, ...(user || {}), g: g.name };
+  if (user && user.g !== g.name) u.sg = 0; // нова група — підгрупа скидається
   await saveUser(env, chatId, u);
+  if (chatId > 0) await setMenuButton(env, chatId, g);
   const text = `✅ Твоя група: <b>${esc(g.name)}</b> (${g.course} курс)\n\nТепер я надсилатиму її розклад сам. Кнопки внизу — щоб подивитися будь-коли.`;
   if (msg) await edit(env, msg, text); else await send(env, chatId, text, MENU);
   if (msg) await send(env, chatId, "Меню 👇", MENU);
   const data = await getJSON(env, `data/g/${g.slug}.json`);
-  const [t, kb] = view(env, data, "today");
+  const [t, kb] = view(env, data, "today", u.sg);
   await send(env, chatId, t, kb);
   return true;
 }
@@ -188,11 +262,21 @@ async function onUpdate(env, upd) {
     if (d === "courses") return edit(env, cb.message, "Обери свій курс 👇", coursesKb(index));
     if (d.startsWith("c:")) return edit(env, cb.message, `${d.slice(2)} курс — обери групу 👇`, groupsKb(index, d.slice(2)));
     if (d.startsWith("g:")) return chooseGroup(env, chatId, index, user, d.slice(2), cb.message);
+    if (d === "help") return edit(env, cb.message, helpText(user, chatId), { inline_keyboard: [[{ text: "⚙️ Налаштування", callback_data: "settings" }]] });
+    if (d === "stop?") return edit(env, cb.message, "Точно відписатися? Я перестану надсилати розклад.", stopKb);
     if (d === "stop") { await env.USERS.delete("u:" + chatId); return edit(env, cb.message, "Готово, я більше не писатиму. Повернутися — /start"); }
-    if (d.startsWith("s:") && user) { const k = d.slice(2); user[k] = user[k] ? 0 : 1; await saveUser(env, chatId, user); return edit(env, cb.message, "⚙️ <b>Налаштування</b>", settingsKb(user)); }
+    if (["settings", "s:", "t:", "h:"].some((p) => d.startsWith(p))) {
+      if (!user) return edit(env, cb.message, "Спершу обери групу 👇", coursesKb(index));
+      if (d.startsWith("t:")) return edit(env, cb.message, d === "t:mh" ? "🌅 О котрій надсилати пари на сьогодні?" : "🌆 О котрій надсилати пари на завтра?", hoursKb(user, d.slice(2)));
+      if (d.startsWith("h:")) { const [, k, h] = d.split(":"); if (["mh", "eh"].includes(k)) { user[k] = +h; user[k === "mh" ? "m" : "e"] = 1; } }
+      else if (d === "s:sg") user.sg = (user.sg + 1) % 3;
+      else if (d.startsWith("s:")) { const k = d.slice(2); if (["m", "e", "c", "w", "s"].includes(k)) user[k] = user[k] ? 0 : 1; }
+      if (d !== "settings") await saveUser(env, chatId, user);
+      return showSettings(env, chatId, index, user, cb.message);
+    }
     const g = await groupData(user);
     if (!g) return edit(env, cb.message, "Спершу обери групу 👇", coursesKb(index));
-    const r = view(env, g, d);
+    const r = view(env, g, d, user.sg);
     if (r) await edit(env, cb.message, r[0], r[1]);
     return;
   }
@@ -209,11 +293,11 @@ async function onUpdate(env, upd) {
   if (key === "help") return send(env, chatId, helpText(user, chatId), MENU);
   if (key === "group") return send(env, chatId, "Обери свій курс 👇", coursesKb(index));
   if (key === "stop") { await env.USERS.delete("u:" + chatId); return send(env, chatId, "Готово, я більше не писатиму. Повернутися — /start", { remove_keyboard: true }); }
-  if (key === "settings") return user ? send(env, chatId, "⚙️ <b>Налаштування</b>", settingsKb(user)) : send(env, chatId, "Спершу обери групу 👇", coursesKb(index));
+  if (key === "settings") return user ? showSettings(env, chatId, index, user) : send(env, chatId, "Спершу обери групу 👇", coursesKb(index));
   if (key) {
     const g = await groupData(user);
     if (!g) return send(env, chatId, "Спершу обери групу 👇", coursesKb(index));
-    const [t, kb] = view(env, g, key);
+    const [t, kb] = view(env, g, key, user.sg);
     return send(env, chatId, t, kb);
   }
   // просто написали назву групи, напр. «соб-11»
