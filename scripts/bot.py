@@ -1,13 +1,19 @@
 #!/usr/bin/env python3
-"""Бот розкладу ПФК НЮУ: перевіряє plc.nlu.edu.ua, розбирає зміни, будує сайт і шле повідомлення в Telegram.
+"""Бот розкладу ПФК НЮУ для всіх груп і курсів.
 
-  python scripts/bot.py update                 # перевірити сайт, оновити data/ та docs/
-  python scripts/bot.py notify --mode morning  # розклад на сьогодні в Telegram
-  python scripts/bot.py notify --mode evening  # розклад на завтра
-  python scripts/bot.py notify --mode watch    # лише нові заміни / новий розклад (якщо є)
-  python scripts/bot.py show --date 2026-10-27 # показати день у консолі
+  python scripts/bot.py run                 # усе разом (так запускає GitHub Actions щогодини)
+  python scripts/bot.py run --mode morning  # примусово надіслати ранкову розсилку (тест)
+  python scripts/bot.py show СОБ-11 [--date 2026-11-03]
 
-Змінні середовища (GitHub Secrets): TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID (кілька — через кому).
+Що робить `run`:
+  1. перевіряє сторінку «Розклад занять» на plc.nlu.edu.ua, завантажує нові PDF і сам їх розбирає
+     (розклад усіх курсів і «Зміни до розкладу») → data/sources/*.json;
+  2. будує сайт: docs/data/index.json, docs/data/g/<група>.json, docs/ics/<група>.ics;
+  3. розсилає в Telegram кожному підписнику розклад ЙОГО групи (список підписників — у Cloudflare Worker),
+     о morning_hour — на сьогодні, о evening_hour — на завтра (у неділю — тиждень),
+     а також одразу — нові заміни й новий розклад.
+
+Змінні середовища: TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID (адмін: технічні помилки), SITE_URL.
 """
 import argparse
 import hashlib
@@ -15,6 +21,7 @@ import json
 import os
 import re
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -24,39 +31,65 @@ from html.parser import HTMLParser
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import parse  # noqa: E402
+
 ROOT = Path(__file__).resolve().parent.parent
 DATA, DOCS = ROOT / "data", ROOT / "docs"
+SRC = DATA / "sources"
 CFG = json.loads((ROOT / "config.json").read_text(encoding="utf-8"))
 TZ = ZoneInfo(CFG.get("timezone", "Europe/Kyiv"))
-PAGE = "http://plc.nlu.edu.ua/%d0%bd%d0%b0%d0%b2%d1%87%d0%b0%d0%bb%d1%8c%d0%bd%d0%b0-%d1%80%d0%be%d0%b1%d0%be%d1%82%d0%b0/%d1%80%d0%be%d0%b7%d0%ba%d0%bb%d0%b0%d0%b4-%d0%b7%d0%b0%d0%bd%d1%8f%d1%82%d1%8c/"
-UA = {"User-Agent": "Mozilla/5.0 (pfk-rozklad bot; +github)"}
-TIMES = {1: ("08:00", "09:20"), 2: ("09:30", "10:50"), 3: ("11:00", "12:15"), 4: ("12:45", "14:00"), 5: ("14:10", "15:30"), 6: ("15:40", "17:00")}
+PAGE = CFG["source_page"]
+BELLS = {int(k): tuple(v) for k, v in CFG["bells"].items()}
+UA = {"User-Agent": "Mozilla/5.0 (pfk-rozklad bot; +https://github.com)"}
 SHORTD = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Нд"]
 DAYN = ["Понеділок", "Вівторок", "Середа", "Четвер", "П'ятниця", "Субота", "Неділя"]
-MONTHS = {"січ": 1, "лют": 2, "бер": 3, "кві": 4, "тра": 5, "чер": 6, "лип": 7, "сер": 8, "вер": 9, "жов": 10, "лис": 11, "гру": 12}
-NUM = "1️⃣ 2️⃣ 3️⃣ 4️⃣ 5️⃣ 6️⃣".split()
+NUM = "1️⃣ 2️⃣ 3️⃣ 4️⃣ 5️⃣ 6️⃣ 7️⃣ 8️⃣".split()
+KEEP_DAYS = 21  # скільки днів тримати старі PDF після завершення їхнього періоду
+TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+ADMINS = [c.strip() for c in os.environ.get("TELEGRAM_CHAT_ID", "").split(",") if c.strip()]
+SITE = (os.environ.get("SITE_URL") or CFG.get("site_url") or "").rstrip("/") + "/"
+
+
+def log(*a):
+    print(*a, file=sys.stderr)
 
 
 def jload(p, default):
     return json.loads(p.read_text(encoding="utf-8")) if p.exists() else default
 
 
-def jsave(p, obj):
+def jsave(p, obj, compact=False):
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps(obj, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    txt = json.dumps(obj, ensure_ascii=False, separators=(",", ":")) if compact else json.dumps(obj, ensure_ascii=False, indent=1)
+    p.write_text(txt + "\n", encoding="utf-8")
+
+
+def now():
+    return datetime.now(TZ)
 
 
 def today():
-    return datetime.now(TZ).date()
+    return now().date()
 
 
-def norm(s):
-    return re.sub(r"[\s\-–]", "", (s or "").upper())
+TR = dict(zip("абвгґдеєжзиіїйклмнопрстуфхцчшщьюя", "a b v h g d e ie zh z y i i i k l m n o p r s t u f kh ts ch sh shch  iu ia".split(" ")))
+
+
+def slug(name):
+    s = "".join(TR.get(ch, ch) for ch in name.lower().replace("'", ""))
+    return re.sub(r"[^a-z0-9]+", "-", s).strip("-")
+
+
+def secret():
+    """Спільний секрет бота й воркера (виводиться з токена — окремо задавати не треба)."""
+    return hashlib.sha256(f"pfk-rozklad:{TOKEN}".encode()).hexdigest()[:48]
 
 
 # ---------------------------------------------------------------- сайт коледжу
-def http_get(url, timeout=60):
-    with urllib.request.urlopen(urllib.request.Request(url, headers=UA), timeout=timeout) as r:
+def http(url, data=None, headers=None, timeout=60):
+    req = urllib.request.Request(url, data=data, headers={**UA, **(headers or {})})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
         return r.read()
 
 
@@ -79,426 +112,474 @@ class Links(HTMLParser):
 
 def classify(text, href):
     name = urllib.parse.unquote(href).lower()
-    t = f"{text} {name}".lower()
-    if not name.endswith(".pdf"):
+    if not name.split("?")[0].endswith(".pdf"):
         return None
+    t = f"{text} {name}".lower()
     if "змін" in t:
-        return "zminy"
-    if "розклад" in t:
-        m = re.search(r"(\d)\s*[-_ ]?\s*курс", t)
-        return f"kurs{m.group(1)}" if m else None
+        return "changes"
+    if "розклад" in t and "курс" in t:
+        return "schedule"
     return None
 
 
-def parse_date(s, year):
-    s = s.strip().lower()
-    m = re.match(r"(\d{1,2})\s*[.\s]\s*(\d{1,2})(?:\.(\d{2,4}))?$", s)
-    if m:
-        y = int(m.group(3)) if m.group(3) else year
-        return date(y + 2000 if y < 100 else y, int(m.group(2)), int(m.group(1)))
-    m = re.match(r"(\d{1,2})\s*[.\s]*\s*([а-яіїєґ']+)", s)
-    if m and m.group(2)[:3] in MONTHS:
-        return date(year, MONTHS[m.group(2)[:3]], int(m.group(1)))
-    return None
+def page_url():
+    p = urllib.parse.urlsplit(PAGE)
+    return urllib.parse.urlunsplit((p.scheme, p.netloc, urllib.parse.quote(urllib.parse.unquote(p.path)), p.query, ""))
 
 
-def parse_zminy(pdf_bytes, fname):
-    import pymupdf
-
-    doc = pymupdf.open(stream=pdf_bytes, filetype="pdf")
-    out = []
-    for page in doc:
-        txt = page.get_text()
-        ym = re.search(r"\d{2}\.\d{2}\.(\d{4})", txt)
-        year = int(ym.group(1)) if ym else today().year
-        for t in page.find_tables().tables:
-            cols, cur = None, None
-            for r in t.rows:
-                row = [" ".join(page.get_text("text", clip=cb).split()) if cb else "" for cb in r.cells]
-                low = [c.lower() for c in row]
-                if "пара" in low and "група" in low:
-                    cols = {k: low.index(k) for k in low if k}; continue
-                if cols is None or not any(row):
-                    continue
-                g = lambda k: row[cols[k]] if k in cols and cols[k] < len(row) else ""  # noqa: E731
-                if g("дата"):
-                    cur = parse_date(g("дата"), year) or cur
-                if not cur:
-                    continue
-                subj = g("дисципліна") or g("зміна")
-                if g("зміна") and g("зміна").lower() == "вікно":
-                    subj = "вікно"
-                pair = re.sub(r"\D", "", g("пара"))
-                if not pair:
-                    continue
-                out.append({"date": cur.isoformat(), "pair": int(pair), "group": g("група"),
-                            "subject": subj or "вікно", "teacher": g("викладач"),
-                            "kind": g("вид заняття") or g("вид"), "source": fname})
-    return out
-
-
-def concerns_group(groups_text):
-    g = norm(CFG["group"])
-    gt = norm(groups_text)
-    if g and g in re.split(r"[,;]", gt) or gt == g:
-        return True
-    return bool(re.search(rf"\b{CFG['course']}\s*курс", groups_text or ""))
-
-
-def crop_group_png(pdf_bytes, out_png):
-    """PNG колонки групи з нового PDF розкладу — для швидкої звірки людиною."""
-    import pymupdf
-
-    doc = pymupdf.open(stream=pdf_bytes, filetype="pdf")
-    g = norm(CFG["group"])
-    for page in doc:
-        words = page.get_text("words")
-        heads = sorted([w for w in words if re.fullmatch(r"[А-ЯІЇЄҐ]{2,4}-\d{2}[А-ЯІЇЄҐа-яіїєґ\-]*", w[4].strip())], key=lambda w: w[0])
-        mine = [w for w in heads if norm(w[4]) == g]
-        if not mine:
-            continue
-        band = sorted([w for w in heads if abs(w[1] - mine[0][1]) < 6], key=lambda w: w[0])
-        i = band.index(mine[0]); cx = lambda w: (w[0] + w[2]) / 2  # noqa: E731
-        left = (cx(band[i - 1]) + cx(band[i])) / 2 if i else 0
-        right = (cx(band[i]) + cx(band[i + 1])) / 2 if i + 1 < len(band) else page.rect.x1
-        right = max(right, left + page.rect.width * 0.35)  # захопити об'єднані клітинки
-        page.get_pixmap(dpi=150, clip=pymupdf.Rect(0, 0, min(right, page.rect.x1), page.rect.y1)).save(out_png)
-        return True
-    page = doc[0]; page.get_pixmap(dpi=110).save(out_png)
-    return False
-
-
-def cmd_update(a=None):
-    state = jload(DATA / "state.json", {"files": {}, "events": []})
-    html = http_get(PAGE).decode("utf-8", "replace")
+def update():
+    """Завантажує нові/змінені PDF і розбирає їх. Повертає список подій для розсилки."""
+    known = {p.stem: jload(p, {}) for p in SRC.glob("*.json")}
+    bootstrap = not known
+    html = http(page_url()).decode("utf-8", "replace")
     p = Links(); p.feed(html)
-    current, zminy, seen = [], [], set()
-    my_kurs = f"kurs{CFG['course']}"
-    events = []
+    events, on_page, seen = [], set(), set()
     for text, href in p.links:
         kind = classify(text, href)
-        if not kind or href in seen:
+        if not kind:
             continue
-        seen.add(href)
-        url = urllib.parse.quote(urllib.parse.urljoin(PAGE, href), safe=":/?=&%#~+")
-        fname = Path(urllib.parse.unquote(urllib.parse.urlparse(url).path)).name
+        url = urllib.parse.quote(urllib.parse.urljoin(page_url(), urllib.parse.unquote(href)), safe=":/?=&%#~+")
+        if url in seen:
+            continue
+        seen.add(url)
+        fname = Path(urllib.parse.unquote(urllib.parse.urlsplit(url).path)).stem
+        key = re.sub(r"[^\w\-.]+", "_", fname)
+        on_page.add(key)
         try:
-            data = http_get(url)
+            pdf = http(url)
         except Exception as e:  # noqa: BLE001
-            print(f"ERR {fname}: {e}", file=sys.stderr); continue
-        h = hashlib.sha256(data).hexdigest()
-        old = state["files"].get(fname, {})
-        is_new = old.get("sha256") != h
-        current.append(fname)
-        state["files"][fname] = {"kind": kind, "title": text, "url": url, "sha256": h,
-                                 "first_seen": old.get("first_seen") or datetime.now(TZ).isoformat(timespec="minutes")}
-        if kind == "zminy":
-            rows = [z for z in parse_zminy(data, fname) if concerns_group(z["group"])]
-            zminy += rows
-            future = [z for z in rows if z["date"] >= today().isoformat()]
-            if is_new and state.get("bootstrapped") and future:
-                events.append({"type": "zminy", "title": text, "url": url, "count": len(future)})
-        elif kind == my_kurs and is_new:
-            DOCS.mkdir(exist_ok=True)
-            crop_group_png(data, DOCS / "novyi_rozklad.png")
-            if old.get("sha256") is not None or state.get("bootstrapped"):
-                events.append({"type": "rozklad", "title": text, "url": url})
-                state["new_schedule"] = {"title": text, "url": url, "seen": datetime.now(TZ).isoformat(timespec="minutes")}
-    if not current:
-        events.append({"type": "error", "title": "На сторінці розкладу не знайдено PDF — можливо, змінився сайт", "url": PAGE})
-    # унікальні зміни, сортування
-    uniq = {(z["date"], z["pair"], z["group"], z["subject"]): z for z in zminy}
-    zminy = sorted(uniq.values(), key=lambda z: (z["date"], z["pair"]))
-    jsave(DATA / "zminy.json", zminy)
-    state["current"] = current
-    state["bootstrapped"] = True
-    state["last_check"] = datetime.now(TZ).isoformat(timespec="minutes")
-    state["events"] = (state.get("events", []) + [dict(e, at=state["last_check"], sent=False) for e in events])[-30:]
-    jsave(DATA / "state.json", state)
-    build_site()
-    print(f"Перевірено: {len(current)} PDF, змін для групи: {len(zminy)}, подій: {len(events)}")
-
-
-# ---------------------------------------------------------------- логіка дня
-def base_items(d):
-    sch = jload(DATA / "rozklad.json", {})
-    if not sch:
-        return None, "Немає data/rozklad.json"
-    d0, d1 = date.fromisoformat(sch["from"]), date.fromisoformat(sch["to"])
-    if not d0 <= d <= d1:
-        return None, f"Розклад діє {d0:%d.%m}–{d1:%d.%m}; на {d:%d.%m} його ще не оновлено"
-    week0 = d0 - timedelta(days=d0.weekday())
-    wk = (d - week0).days // 7 + 1
-    res = []
-    for it in sch["items"]:
-        if it["day"] != d.isoweekday():
+            log(f"ERR завантаження {fname}: {e}"); continue
+        h = hashlib.sha256(pdf).hexdigest()
+        old = known.get(key, {})
+        if old.get("sha256") == h:
             continue
-        if it.get("dates") and d.isoformat() not in it["dates"]:
-            continue
-        if it.get("from") and d < date.fromisoformat(it["from"]):
-            continue
-        if it.get("to") and d > date.fromisoformat(it["to"]):
-            continue
-        if it.get("weeks") in ("odd", "even") and (it["weeks"] == "odd") != (wk % 2 == 1):
-            continue
-        res.append(dict(it))
-    return res, None
-
-
-def day_plan(d):
-    items, err = base_items(d)
-    zm = [z for z in jload(DATA / "zminy.json", []) if z["date"] == d.isoformat()]
-    if items is None:
-        return {"date": d.isoformat(), "error": err, "items": [], "changes": zm}
-    by = {it["pair"]: it for it in items}
-    for z in zm:
-        if z["subject"].lower() == "вікно":
-            if z["pair"] in by:
-                by[z["pair"]]["cancelled"] = True
+        rec = {"file": fname, "title": text or fname, "url": url, "kind": kind, "sha256": h,
+               "first_seen": old.get("first_seen") or now().isoformat(timespec="minutes"),
+               "updated": now().isoformat(timespec="minutes")}
+        try:
+            if kind == "schedule":
+                rec["data"] = parse.parse_schedule(pdf, text)
+                if not rec["data"]["items"]:
+                    raise ValueError("не знайдено жодної пари")
             else:
-                by[z["pair"]] = {"pair": z["pair"], "subject": "вікно", "cancelled": True}
-        else:
-            prev = by.get(z["pair"])
-            by[z["pair"]] = {"pair": z["pair"], "subject": z["subject"], "teacher": z["teacher"],
-                             "type": "Пр" if "практ" in (z["kind"] or "").lower() else ("Лк" if "лек" in (z["kind"] or "").lower() else ""),
-                             "room": (prev or {}).get("room", ""), "changed": True,
-                             "was": (prev or {}).get("subject")}
-    out = []
-    for p in sorted(by):
-        it = by[p]
-        st, en = TIMES.get(p, ("", ""))
-        it["start"], it["end"] = it.get("start") or st, it.get("end") or en
-        out.append(it)
-    return {"date": d.isoformat(), "items": out, "changes": zm}
-
-
-def fmt_day(plan, title):
-    d = date.fromisoformat(plan["date"])
-    head = f"📅 <b>{title}: {DAYN[d.weekday()]}, {d:%d.%m}</b> — {escape(CFG['group'])}"
-    if plan.get("error"):
-        return f"{head}\n⚠️ {escape(plan['error'])}"
-    if d.weekday() >= 5:
-        return f"{head}\n😴 Вихідний"
-    lines = [head]
-    live = [i for i in plan["items"] if not i.get("cancelled")]
-    if not live:
-        lines.append("Пар немає 🎉")
-    for it in plan["items"]:
-        n = NUM[it["pair"] - 1] if 0 < it["pair"] <= 6 else str(it["pair"])
-        if it.get("cancelled"):
-            lines.append(f"{n} <s>{escape(it.get('subject', ''))}</s> — <b>вікно</b>"); continue
-        t = f"{it.get('type', '')} ".lstrip()
-        extra = f" ({escape(it['teacher'])})" if it.get("teacher") else ""
-        mark = " 🔄" if it.get("changed") else ""
-        lines.append(f"{n} {it['start']}–{it['end']}  {escape(t + it['subject'])}{extra}{mark}")
-    if any(i.get("changed") or i.get("cancelled") for i in plan["items"]):
-        lines.append("\n🔄 — заміна за PDF «Зміни до розкладу»")
-    if live:
-        lines.append(f"🏁 Перша пара о {live[0]['start']}, остання закінчується о {live[-1]['end']}")
-    return "\n".join(lines)
-
-
-# ---------------------------------------------------------------- Telegram
-def tg_send(text, buttons=True):
-    token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
-    chats = [c.strip() for c in os.environ.get("TELEGRAM_CHAT_ID", "").split(",") if c.strip()]
-    if not token or not chats:
-        print("[Telegram не налаштовано — повідомлення лише в лог]\n" + re.sub(r"<[^>]+>", "", text)); return
-    ok = 0
-    hints = {
-        "chat not found": "невірний TELEGRAM_CHAT_ID або ти ще не писав боту",
-        "bot can't initiate conversation": "відкрий бота в Telegram і натисни START (/start)",
-        "bots can't send messages to bots": "у TELEGRAM_CHAT_ID стоїть ID бота (цифри з токена), а треба твій chat id з getUpdates",
-        "bot was blocked by the user": "ти заблокував бота — розблокуй і натисни START",
-        "Unauthorized": "невірний TELEGRAM_BOT_TOKEN",
-    }
-    for chat in chats:
-        payload = {"chat_id": chat, "text": text, "parse_mode": "HTML", "disable_web_page_preview": "true"}
-        site = CFG.get("site_url", "")
-        if buttons and site:
-            payload["reply_markup"] = json.dumps({"inline_keyboard": [[
-                {"text": "🌐 Сайт", "url": site},
-                {"text": "📲 Календар", "url": site + "rozklad.ics"}]]})
-        body = urllib.parse.urlencode(payload).encode()
-        try:
-            urllib.request.urlopen(f"https://api.telegram.org/bot{token}/sendMessage", body, timeout=30).read()
-            print(f"Надіслано в чат …{chat[-4:]}")
-            ok += 1
-        except urllib.error.HTTPError as e:
-            try:
-                desc = json.loads(e.read().decode()).get("description", "")
-            except Exception:  # noqa: BLE001
-                desc = ""
-            hint = next((v for k, v in hints.items() if k.lower() in desc.lower()), "")
-            print(f"Telegram помилка для …{chat[-4:]}: {e.code} {desc}" + (f"\n  ➜ Що зробити: {hint}" if hint else ""), file=sys.stderr)
+                rec["data"] = parse.parse_changes(pdf)
         except Exception as e:  # noqa: BLE001
-            print(f"Telegram помилка для …{chat[-4:]}: {e}", file=sys.stderr)
-    if ok == 0:
-        sys.exit("Жодне повідомлення не доставлено — дивись помилку вище.")
-
-
-def fmt_week(monday):
-    head = f"🗓 <b>Тиждень {monday:%d.%m}–{(monday + timedelta(days=4)):%d.%m}</b> — {escape(CFG['group'])}"
-    lines = [head]
-    for i in range(5):
-        d = monday + timedelta(days=i)
-        plan = day_plan(d)
-        if plan.get("error"):
-            lines.append(f"<b>{SHORTD[d.weekday()]} {d:%d.%m}</b>: ⚠️ розклад ще не оновлено"); continue
-        live = [x for x in plan["items"] if not x.get("cancelled")]
-        if not live:
-            lines.append(f"<b>{SHORTD[d.weekday()]} {d:%d.%m}</b>: пар немає 🎉"); continue
-        subj = " · ".join(escape(x["subject"]) + (" 🔄" if x.get("changed") else "") for x in live)
-        lines.append(f"<b>{SHORTD[d.weekday()]} {d:%d.%m}</b> ({live[0]['start']}–{live[-1]['end']}, {len(live)} пар)\n{subj}")
-        if any(x.get("cancelled") for x in plan["items"]):
-            lines[-1] += "\n⚠️ є «вікно»"
-    return "\n\n".join(lines)
-
-
-def setup_bot():
-    """Меню команд і опис бота (виконується автоматично; BotFather вручну не потрібен)."""
-    token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
-    if not token:
-        return
-    def call(method, data):
-        try:
-            urllib.request.urlopen(f"https://api.telegram.org/bot{token}/{method}",
-                                   json.dumps(data).encode(), timeout=20).read()
-        except Exception as e:  # noqa: BLE001
-            print(f"{method}: {e}", file=sys.stderr)
-    hdr = {"Content-Type": "application/json"}
-    def post(method, data):
-        req = urllib.request.Request(f"https://api.telegram.org/bot{token}/{method}", json.dumps(data).encode(), hdr)
-        try:
-            urllib.request.urlopen(req, timeout=20).read()
-        except Exception as e:  # noqa: BLE001
-            print(f"{method}: {e}", file=sys.stderr)
-    post("setMyCommands", {"commands": [
-        {"command": "today", "description": "Пари сьогодні"},
-        {"command": "tomorrow", "description": "Пари завтра"},
-        {"command": "week", "description": "Розклад на тиждень"},
-        {"command": "changes", "description": "Заміни"},
-        {"command": "help", "description": "Допомога"}]})
-    post("setMyDescription", {"description": f"Розклад групи {CFG['group']} (ПФК НЮУ): пари на сьогодні й завтра, огляд тижня, заміни. Дані з plc.nlu.edu.ua."})
-    post("setMyShortDescription", {"short_description": f"Розклад і заміни {CFG['group']} · ПФК НЮУ"})
-
-
-def cmd_notify(a):
-    setup_bot()
-    state = jload(DATA / "state.json", {"events": []})
-    site = CFG.get("site_url", "")
-    msgs = []
-    if a.mode == "morning" and today().weekday() < 5:
-        msgs.append(fmt_day(day_plan(today()), "Сьогодні"))
-    if a.mode in ("evening", "weekly"):
-        tm = today() + timedelta(days=1)
-        if a.mode == "weekly" or today().weekday() == 6:
-            nxt_mon = today() + timedelta(days=(7 - today().weekday()) % 7 or 7)
-            msgs.append(fmt_week(nxt_mon if today().weekday() >= 5 else today() - timedelta(days=today().weekday())))
-        elif tm.weekday() < 5:
-            msgs.append(fmt_day(day_plan(tm), "Завтра"))
-    for e in state.get("events", []):
-        if e.get("sent"):
+            rec["error"] = f"{type(e).__name__}: {e}"
+            events.append({"type": "error", "text": f"Не вдалося розібрати PDF «{text}»: {rec['error']}", "url": url})
+        jsave(SRC / f"{key}.json", rec)
+        known[key] = rec
+        if bootstrap or "error" in rec:
             continue
-        if e["type"] == "zminy" and e.get("count"):
-            msgs.append(f"🔔 <b>Нові зміни до розкладу</b> ({escape(e['title'])}) — є записи для {escape(CFG['group'])}: {e['count']}.\n{e['url']}")
-        elif e["type"] == "rozklad":
-            msgs.append(f"🆕 <b>На сайті новий розклад</b>: {escape(e['title'])}.\nПотрібна звірка й оновлення data/rozklad.json (поки бот показує старий).\n{e['url']}")
-        elif e["type"] == "error":
-            msgs.append(f"⚠️ {escape(e['title'])}\n{e['url']}")
-        e["sent"] = True
-    jsave(DATA / "state.json", state)
-    if msgs:
-        tg_send("\n\n".join(msgs) + (f"\n\n🌐 {site}" if site else ""))
-    else:
-        print("Нічого надсилати.")
+        if kind == "schedule":
+            events.append({"type": "schedule", "course": rec["data"]["course"], "from": rec["data"]["from"],
+                           "to": rec["data"]["to"], "title": rec["title"], "url": url, "changed": bool(old)})
+        else:
+            prev = {json.dumps(z, sort_keys=True, ensure_ascii=False) for z in old.get("data", [])}
+            fresh = [z for z in rec["data"] if json.dumps(z, sort_keys=True, ensure_ascii=False) not in prev
+                     and z["date"] >= today().isoformat()]
+            if fresh:
+                events.append({"type": "changes", "rows": fresh, "title": rec["title"], "url": url})
+    if not seen:
+        events.append({"type": "error", "text": "На сторінці розкладу не знайдено жодного PDF — можливо, змінився сайт коледжу", "url": PAGE})
+    # прибираємо старі PDF, яких уже немає на сайті
+    limit = (today() - timedelta(days=KEEP_DAYS)).isoformat()
+    for key, rec in list(known.items()):
+        if key in on_page or not seen:
+            continue
+        d = rec.get("data")
+        end = d.get("to") if isinstance(d, dict) else max((z["date"] for z in d or []), default="")
+        if (end or "") < limit:
+            (SRC / f"{key}.json").unlink(missing_ok=True); known.pop(key)
+    for k, rec in known.items():
+        rec["on_page"] = k in on_page
+    return known, events
 
 
-# ---------------------------------------------------------------- сайт + ics
-def build_site():
-    DOCS.mkdir(exist_ok=True)
-    sch = jload(DATA / "rozklad.json", {})
-    state = jload(DATA / "state.json", {})
-    t0 = today()
-    days = [day_plan(t0 + timedelta(days=i)) for i in range(0, 14)]
-    files = state.get("files", {})
-    site = {
-        "group": CFG["group"], "course": CFG["course"], "college": CFG.get("college", ""),
-        "generated": datetime.now(TZ).isoformat(timespec="minutes"),
-        "last_check": state.get("last_check"),
-        "schedule": {"from": sch.get("from"), "to": sch.get("to"), "source": sch.get("source"), "items": sch.get("items", [])},
-        "days": days, "changes": jload(DATA / "zminy.json", []),
-        "new_schedule": state.get("new_schedule"),
-        "pdfs": [{"title": files[f]["title"], "url": files[f]["url"], "kind": files[f]["kind"]} for f in state.get("current", []) if f in files],
-        "times": {str(k): v for k, v in TIMES.items()},
-        "source_page": PAGE,
-    }
-    jsave(DOCS / "site.json", site)
-    build_ics(sch, DOCS / "rozklad.ics")
-    build_icons()
-
-
-def build_icons():
-    """PNG-іконки для PWA з docs/icon.svg (потрібні Android/iOS)."""
-    src = DOCS / "icon.svg"
-    if not src.exists():
-        return
-    try:
-        import pymupdf
-        for size in (192, 512):
-            out = DOCS / f"icon-{size}.png"
-            if out.exists() and out.stat().st_mtime >= src.stat().st_mtime:
+# ---------------------------------------------------------------- збірка даних по групах
+def build(sources):
+    schedules = sorted([s for s in sources.values() if s.get("kind") == "schedule" and "data" in s],
+                       key=lambda s: (s["first_seen"], s["data"]["from"]))
+    changes_src = [s for s in sources.values() if s.get("kind") == "changes" and "data" in s]
+    groups, by_course_date = {}, {}
+    for s in schedules:  # пізніше опублікований PDF перекриває попередній на ті ж дати
+        d = s["data"]
+        c = d.get("course") or 0
+        for g in d["groups"]:
+            groups[g["name"]] = {**groups.get(g["name"], {}), **g, "course": c, "seen": d["to"]}
+        day = date.fromisoformat(d["from"])
+        while day.isoformat() <= d["to"]:
+            by_course_date[(c, day.isoformat())] = s
+            day += timedelta(days=1)
+    # групи з найновіших PDF кожного курсу (щоб розформовані групи зникали зі списку)
+    latest = {}
+    for g in groups.values():
+        latest[g["course"]] = max(latest.get(g["course"], ""), g["seen"])
+    groups = {n: g for n, g in groups.items() if g["seen"] == latest[g["course"]]}
+    glist = list(groups.values())
+    out = {n: {"group": n, "course": g["course"], "room": g.get("room", ""), "slug": slug(n), "days": {}, "changes": []}
+           for n, g in groups.items()}
+    for (c, iso), s in by_course_date.items():
+        if date.fromisoformat(iso).weekday() == 6:
+            continue
+        for n in out:
+            if groups[n]["course"] != c:
                 continue
-            doc = pymupdf.open(src)
-            page = doc[0]
-            zoom = size / max(page.rect.width, page.rect.height)
-            page.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom), alpha=False).save(out)
-    except Exception as e:  # noqa: BLE001
-        print(f"Іконки не створено: {e}", file=sys.stderr)
+            items = [dict(it) for it in s["data"]["items"] if it["group"] == n and it["date"] == iso]
+            for it in items:
+                it.pop("group"); it.pop("date")
+                it.setdefault("room", "потік" if it.get("stream") else groups[n].get("room", ""))
+            if date.fromisoformat(iso).weekday() == 5 and not items:
+                continue
+            out[n]["days"][iso] = {"items": items, "src": s["title"]}
+    for s in changes_src:
+        for z in s["data"]:
+            for n in parse.change_targets(z["group"], glist):
+                if n in out:
+                    out[n]["changes"].append({**z, "src": s["title"], "url": s["url"]})
+    for n, g in out.items():
+        uniq = {(z["date"], z["pair"], z["subject"]): z for z in g["changes"]}
+        g["changes"] = sorted(uniq.values(), key=lambda z: (z["date"], z["pair"]))
+        for z in g["changes"]:
+            day = g["days"].setdefault(z["date"], {"items": [], "src": ""})
+            same = [it for it in day["items"] if it["pair"] == z["pair"]]
+            st, en = (same[0]["start"], same[0]["end"]) if same else BELLS.get(z["pair"], ("", ""))
+            if z["subject"].lower().strip() == "вікно":
+                for it in same:  # «вікно» там, де пари й так немає, — нічого не змінює
+                    it["cancelled"] = True
+            else:
+                kind = (z.get("kind") or "").lower()
+                new = {"pair": z["pair"], "start": st, "end": en, "subject": z["subject"], "teacher": z.get("teacher", ""),
+                       "type": "Пр" if "практ" in kind else "Лк" if "лек" in kind else "", "changed": True,
+                       "room": z.get("room") or (same[0].get("room", "") if same else g["room"])}
+                if same:
+                    new["was"] = " / ".join(dict.fromkeys(it["subject"] for it in same))
+                day["items"] = [it for it in day["items"] if it["pair"] != z["pair"]] + [new]
+            day["items"].sort(key=lambda it: (it["pair"], it.get("subgroup", 0)))
+        g["days"] = dict(sorted(g["days"].items()))
+    pdfs = [{"title": s["title"], "url": s["url"], "kind": s["kind"],
+             "course": (s.get("data") or {}).get("course") if s["kind"] == "schedule" else None}
+            for s in sorted(sources.values(), key=lambda s: s.get("title", "")) if s.get("on_page")]
+    return out, pdfs
 
 
-def build_ics(sch, target):
-    if not sch:
-        return
-    d0, d1 = date.fromisoformat(sch["from"]), date.fromisoformat(sch["to"])
-    stamp = datetime.now(TZ).strftime("%Y%m%dT%H%M%S")
+def write_site(out, pdfs, bot_name):
+    """docs/data/* і docs/ics/*. Повертає хеш вмісту (щоб не деплоїти сайт без змін)."""
+    gdir, idir = DOCS / "data" / "g", DOCS / "ics"
+    for d in (gdir, idir):
+        d.mkdir(parents=True, exist_ok=True)
+        for f in d.iterdir():
+            f.unlink()
+    courses = {}
+    for n, g in sorted(out.items(), key=lambda kv: kv[1]["course"]):  # у межах курсу — порядок стовпців PDF
+        courses.setdefault(str(g["course"]), []).append({"name": n, "slug": g["slug"], "room": g["room"]})
+        jsave(gdir / f"{g['slug']}.json", g, compact=True)
+        build_ics(g, idir / f"{g['slug']}.ics")
+    index = {"college": CFG["college"], "short": CFG.get("short", ""), "bot": bot_name, "source_page": PAGE,
+             "bells": CFG["bells"], "courses": courses, "pdfs": pdfs}
+    h = hashlib.sha256(json.dumps([index, out], ensure_ascii=False, sort_keys=True).encode()).hexdigest()[:16]
+    index.update({"hash": h, "updated": now().isoformat(timespec="minutes")})
+    jsave(DOCS / "data" / "index.json", index)
+    return h
+
+
+def build_ics(g, target):
+    stamp = now().astimezone(ZoneInfo("UTC")).strftime("%Y%m%dT%H%M%SZ")
+    esc = lambda s: str(s or "").replace("\\", "\\\\").replace(";", "\\;").replace(",", "\\,").replace("\n", "\\n")  # noqa: E731
     out = ["BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//pfk-rozklad//UK", "CALSCALE:GREGORIAN", "METHOD:PUBLISH",
-           f"X-WR-CALNAME:Розклад {CFG['group']}", "X-WR-TIMEZONE:Europe/Kyiv",
+           f"X-WR-CALNAME:Розклад {g['group']}", "X-WR-TIMEZONE:Europe/Kyiv", "REFRESH-INTERVAL;VALUE=DURATION:PT6H",
            "BEGIN:VTIMEZONE", "TZID:Europe/Kyiv",
            "BEGIN:STANDARD", "DTSTART:19701025T040000", "RRULE:FREQ=YEARLY;BYMONTH=10;BYDAY=-1SU", "TZOFFSETFROM:+0300", "TZOFFSETTO:+0200", "TZNAME:EET", "END:STANDARD",
            "BEGIN:DAYLIGHT", "DTSTART:19700329T030000", "RRULE:FREQ=YEARLY;BYMONTH=3;BYDAY=-1SU", "TZOFFSETFROM:+0200", "TZOFFSETTO:+0300", "TZNAME:EEST", "END:DAYLIGHT",
            "END:VTIMEZONE"]
-    d = max(d0, today() - timedelta(days=7))
-    while d <= d1:
-        for it in day_plan(d)["items"]:
-            if it.get("cancelled"):
+    for iso, day in g["days"].items():
+        d = iso.replace("-", "")
+        for it in day["items"]:
+            if it.get("cancelled") or not it.get("start"):
                 continue
-            uid = hashlib.md5(f"{d}{it['pair']}".encode()).hexdigest()
+            uid = hashlib.md5(f"{g['group']}{iso}{it['pair']}{it.get('subgroup', '')}{it['subject']}".encode()).hexdigest()
+            title = f"{(it.get('type', '') + ' ' + it['subject']).strip()}{' (заміна)' if it.get('changed') else ''}"
             out += ["BEGIN:VEVENT", f"UID:{uid}@pfk-rozklad", f"DTSTAMP:{stamp}",
-                    f"DTSTART;TZID=Europe/Kyiv:{d:%Y%m%d}T{it['start'].replace(':', '')}00",
-                    f"DTEND;TZID=Europe/Kyiv:{d:%Y%m%d}T{it['end'].replace(':', '')}00",
-                    f"SUMMARY:{(it.get('type', '') + ' ' + it['subject']).strip()}{' (заміна)' if it.get('changed') else ''}",
-                    f"LOCATION:{it.get('room', '')}", f"DESCRIPTION:{it.get('teacher', '')} · {it['pair']} пара", "END:VEVENT"]
-        d += timedelta(days=1)
+                    f"DTSTART;TZID=Europe/Kyiv:{d}T{it['start'].replace(':', '')}00",
+                    f"DTEND;TZID=Europe/Kyiv:{d}T{it['end'].replace(':', '')}00",
+                    f"SUMMARY:{esc(title)}", f"LOCATION:{esc('онлайн' if it.get('online') else it.get('room', ''))}",
+                    f"DESCRIPTION:{esc(' · '.join(x for x in [it.get('teacher', ''), str(it['pair']) + ' пара'] if x))}", "END:VEVENT"]
     out.append("END:VCALENDAR")
     target.write_text("\r\n".join(out) + "\r\n", encoding="utf-8")
 
 
+# ---------------------------------------------------------------- тексти повідомлень
+def lesson_line(it):
+    n = NUM[it["pair"] - 1] if 0 < it["pair"] <= len(NUM) else f"{it['pair']}."
+    if it.get("cancelled"):
+        return f"{n} <s>{escape(it.get('subject', ''))}</s> — <b>вікно</b>"
+    t = (it.get("type", "") + " ").lstrip()
+    extra = []
+    if it.get("subgroup"):
+        extra.append(f"{it['subgroup']} підгр.")
+    if it.get("teacher"):
+        extra.append(escape(it["teacher"]))
+    if it.get("online"):
+        extra.append("онлайн")
+    mark = " 🔄" if it.get("changed") else ""
+    return f"{n} {it['start']}–{it['end']}  <b>{escape(t + it['subject'])}</b>{mark}" + (f"\n      <i>{', '.join(extra)}</i>" if extra else "")
+
+
+def fmt_day(g, d, title):
+    head = f"📅 <b>{title}: {DAYN[d.weekday()]}, {d:%d.%m}</b> · {escape(g['group'])}"
+    day = g["days"].get(d.isoformat())
+    if day is None:
+        return f"{head}\n😴 Вихідний" if d.weekday() >= 5 else f"{head}\n⚠️ Розклад на цю дату ще не опубліковано"
+    live = [i for i in day["items"] if not i.get("cancelled")]
+    if not live and not day["items"]:
+        return f"{head}\nПар немає 🎉"
+    lines = [head, ""] + [lesson_line(it) for it in day["items"]]
+    if any(i.get("changed") or i.get("cancelled") for i in day["items"]):
+        lines.append("\n🔄 — заміна з «Змін до розкладу»")
+    if live:
+        lines.append(f"\n🏁 {live[0]['start']}–{live[-1]['end']} · {len(live)} {plural(len(live))}")
+    return "\n".join(lines)
+
+
+def plural(n):
+    return "пара" if n % 10 == 1 and n % 100 != 11 else "пари" if 2 <= n % 10 <= 4 and not 12 <= n % 100 <= 14 else "пар"
+
+
+def fmt_week(g, monday):
+    lines = [f"🗓 <b>Тиждень {monday:%d.%m}–{monday + timedelta(days=4):%d.%m}</b> · {escape(g['group'])}"]
+    for i in range(6):
+        d = monday + timedelta(days=i)
+        day = g["days"].get(d.isoformat())
+        if day is None:
+            if i < 5:
+                lines.append(f"<b>{SHORTD[i]} {d:%d.%m}</b>: ⚠️ ще не опубліковано")
+            continue
+        live = [x for x in day["items"] if not x.get("cancelled")]
+        if not live:
+            lines.append(f"<b>{SHORTD[i]} {d:%d.%m}</b>: пар немає 🎉"); continue
+        subj = "\n".join(f"  {x['pair']}. {escape(x['subject'])}{' 🔄' if x.get('changed') else ''}" for x in live)
+        lines.append(f"<b>{SHORTD[i]} {d:%d.%m}</b> · {live[0]['start']}–{live[-1]['end']}\n{subj}")
+    return "\n\n".join(lines)
+
+
+# ---------------------------------------------------------------- Telegram і воркер
+def tg(method, payload):
+    req = urllib.request.Request(f"https://api.telegram.org/bot{TOKEN}/{method}", json.dumps(payload).encode(),
+                                 {"Content-Type": "application/json"})
+    for attempt in range(3):
+        try:
+            with urllib.request.urlopen(req, timeout=30) as r:
+                return json.loads(r.read())
+        except urllib.error.HTTPError as e:
+            body = json.loads(e.read().decode() or "{}")
+            if e.code == 429 and attempt < 2:
+                time.sleep(body.get("parameters", {}).get("retry_after", 3) + 1); continue
+            return body
+        except Exception as e:  # noqa: BLE001
+            if attempt == 2:
+                return {"ok": False, "description": str(e)}
+            time.sleep(2)
+
+
+class Worker:
+    """Список підписників і «один раз» — живуть у Cloudflare Worker (KV). URL беремо з вебхука бота."""
+
+    def __init__(self):
+        self.url = None
+        if TOKEN:
+            info = tg("getWebhookInfo", {}) or {}
+            u = (info.get("result") or {}).get("url") or ""
+            self.url = u.rstrip("/") or None
+
+    def call(self, path, body=None):
+        if not self.url:
+            return None
+        try:
+            data = json.dumps(body).encode() if body is not None else None
+            r = http(self.url + path, data=data, timeout=30,
+                     headers={"Authorization": f"Bearer {secret()}", "Content-Type": "application/json"})
+            return json.loads(r)
+        except Exception as e:  # noqa: BLE001
+            log(f"Воркер {path}: {e}")
+            return None
+
+    def users(self):
+        r = self.call("/api/users")
+        return r.get("users") if isinstance(r, dict) else None
+
+    def once(self, key):
+        """True, якщо ця подія ще не відбувалась (захист від дублів, коли GitHub запускає двічі)."""
+        r = self.call("/api/once", {"key": key})
+        return True if r is None else bool(r.get("first"))
+
+
+def broadcast(users, make_text, kb=None):
+    """make_text(user) → текст або None. Повертає id чатів, які заблокували бота."""
+    gone, sent = [], 0
+    for u in users:
+        text = make_text(u)
+        if not text:
+            continue
+        p = {"chat_id": u["id"], "text": text, "parse_mode": "HTML", "link_preview_options": {"is_disabled": True}}
+        if kb:
+            p["reply_markup"] = kb(u)
+        r = tg("sendMessage", p) or {}
+        if r.get("ok"):
+            sent += 1
+        else:
+            desc = r.get("description", "")
+            log(f"…{str(u['id'])[-4:]}: {desc}")
+            if r.get("error_code") in (400, 403) and re.search(r"blocked|deactivated|not found|kicked|PEER_ID", desc, re.I):
+                gone.append(u["id"])
+        time.sleep(0.05)
+    log(f"Надіслано: {sent}")
+    return gone
+
+
+def site_kb(g):
+    if not SITE.startswith("http") or not g:
+        return None
+    return {"inline_keyboard": [[{"text": "🌐 Сайт", "url": f"{SITE}?g={urllib.parse.quote(g['group'])}"},
+                                 {"text": "📲 У календар", "url": f"{SITE}ics/{g['slug']}.ics"}]]}
+
+
+def notify(out, events, mode):
+    if not TOKEN:
+        log("TELEGRAM_BOT_TOKEN не задано — розсилку пропущено")
+        return
+    w = Worker()
+    users = w.users()
+    if users is None:  # воркер ще не налаштовано — як раніше: шлемо в TELEGRAM_CHAT_ID для default_group
+        log("Воркер недоступний — розсилка лише в TELEGRAM_CHAT_ID")
+        users = [{"id": c, "g": CFG.get("default_group"), "m": 1, "e": 1, "c": 1} for c in ADMINS]
+    else:
+        known = {str(u["id"]) for u in users}
+        for c in ADMINS:  # автоматично переносимо старий чат у список підписників
+            if c not in known and w.once(f"migrate:{c}"):
+                w.call("/api/add", {"id": c, "g": CFG.get("default_group")})
+                users.append({"id": c, "g": CFG.get("default_group"), "m": 1, "e": 1, "c": 1})
+    t, h = today(), now().hour
+    gone = []
+    G = lambda u: out.get(u.get("g") or "")  # noqa: E731
+    kb = lambda u: site_kb(G(u))  # noqa: E731
+
+    def due(name, hour):
+        # GitHub інколи запускає із запізненням — тож вікно 2 години, а дублі відсікає воркер (once)
+        window = (hour, hour + 1) if w.url else (hour,)
+        return mode == name or (mode == "auto" and h in window and w.once(f"{name}:{t}"))
+
+    if due("morning", CFG["morning_hour"]):
+        gone += broadcast(users, lambda u: G(u) and u.get("m", 1) and t.isoformat() in G(u)["days"]
+                          and fmt_day(G(u), t, "Сьогодні"), kb)
+    if due("evening", CFG["evening_hour"]):
+        if t.weekday() in (5, 6):  # субота/неділя ввечері — огляд наступного тижня
+            mon = t + timedelta(days=7 - t.weekday())
+            if t.weekday() == 6:
+                gone += broadcast(users, lambda u: G(u) and u.get("e", 1) and fmt_week(G(u), mon), kb)
+        else:
+            tm = t + timedelta(days=1)
+            gone += broadcast(users, lambda u: G(u) and u.get("e", 1) and tm.isoformat() in G(u)["days"]
+                              and fmt_day(G(u), tm, "Завтра"), kb)
+    if mode == "weekly":
+        mon = t - timedelta(days=t.weekday()) if t.weekday() < 5 else t + timedelta(days=7 - t.weekday())
+        gone += broadcast(users, lambda u: G(u) and fmt_week(G(u), mon), kb)
+    for e in events:
+        if e["type"] == "changes":
+            def txt(u, e=e):
+                g = G(u)
+                if not g or not u.get("c", 1):
+                    return None
+                mine = [z for z in e["rows"] if g["group"] in parse.change_targets(z["group"], [{"name": g["group"], "course": g["course"]}])]
+                if not mine:
+                    return None
+                rows = "\n".join(f"• {date.fromisoformat(z['date']):%d.%m} ({SHORTD[date.fromisoformat(z['date']).weekday()]}), {z['pair']} пара: "
+                                 + ("<b>вікно</b>" if z["subject"].lower() == "вікно" else escape(z["subject"] + (f", {z['teacher']}" if z.get("teacher") else "")))
+                                 for z in mine)
+                return f"🔔 <b>Нові заміни</b> · {escape(g['group'])}\n\n{rows}"
+            gone += broadcast(users, txt, kb)
+        elif e["type"] == "schedule":
+            d0 = date.fromisoformat(e["from"])
+            mon = d0 - timedelta(days=d0.weekday())
+            word = "Оновлено розклад" if e.get("changed") else "Новий розклад"
+            gone += broadcast(users, lambda u, e=e: G(u) and G(u)["course"] == e["course"] and u.get("c", 1)
+                              and f"🆕 <b>{word}</b> ({date.fromisoformat(e['from']):%d.%m}–{date.fromisoformat(e['to']):%d.%m})\n\n" + fmt_week(G(u), mon), kb)
+        elif e["type"] == "error" and ADMINS:
+            for c in ADMINS:
+                tg("sendMessage", {"chat_id": c, "text": f"⚠️ {e['text']}\n{e.get('url', '')}"})
+    if gone and w.url:
+        w.call("/api/drop", {"ids": gone})
+
+
+def setup_bot():
+    """Меню команд і опис бота (раз на добу; BotFather вручну не потрібен)."""
+    me = (tg("getMe", {}) or {}).get("result") or {}
+    w = Worker()
+    if w.url and not w.once(f"setup:{today()}"):
+        return me.get("username", "")
+    tg("setMyCommands", {"commands": [
+        {"command": "today", "description": "Пари сьогодні"},
+        {"command": "tomorrow", "description": "Пари завтра"},
+        {"command": "week", "description": "Розклад на тиждень"},
+        {"command": "changes", "description": "Заміни"},
+        {"command": "group", "description": "Обрати / змінити групу"},
+        {"command": "settings", "description": "Сповіщення"},
+        {"command": "help", "description": "Допомога"}]})
+    tg("setMyDescription", {"description": f"Розклад усіх груп {CFG.get('short', '')}: пари на сьогодні й завтра, тиждень, заміни. "
+                                           "Натисни «Почати» й обери свою групу. Дані — з plc.nlu.edu.ua."})
+    tg("setMyShortDescription", {"short_description": f"Розклад і заміни всіх груп · {CFG.get('short', '')}"})
+    return me.get("username", "")
+
+
+# ---------------------------------------------------------------- команди
+def deployed_hash():
+    if not SITE.startswith("http"):
+        return None
+    try:
+        return json.loads(http(SITE + "data/index.json?" + str(int(time.time())), timeout=20)).get("hash")
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def cmd_run(a):
+    try:
+        sources, events = update()
+    except Exception as e:  # noqa: BLE001  сайт коледжу недоступний — працюємо з тим, що є
+        log(f"Сайт коледжу недоступний: {e}")
+        sources = {p.stem: jload(p, {}) for p in SRC.glob("*.json")}
+        for k, rec in sources.items():
+            rec["on_page"] = True
+        events = []
+    out, pdfs = build(sources)
+    bot_name = setup_bot() if TOKEN else ""
+    h = write_site(out, pdfs, bot_name)
+    changed = h != deployed_hash()
+    if os.environ.get("GITHUB_OUTPUT"):
+        with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+            f.write(f"deploy={'true' if changed or a.mode != 'auto' else 'false'}\n")
+    log(f"Груп: {len(out)}, PDF: {len(pdfs)}, подій: {len(events)}, сайт {'змінився' if changed else 'без змін'}")
+    notify(out, events, a.mode)
+
+
 def cmd_show(a):
+    sources = {p.stem: jload(p, {}) for p in SRC.glob("*.json")}
+    for rec in sources.values():
+        rec["on_page"] = True
+    out, _ = build(sources)
+    g = out.get(a.group) or next((v for k, v in out.items() if parse._norm(k) == parse._norm(a.group)), None)
+    if not g:
+        sys.exit(f"Групу не знайдено. Є: {', '.join(sorted(out))}")
     d = date.fromisoformat(a.date) if a.date else today()
-    print(re.sub(r"<[^>]+>", "", fmt_day(day_plan(d), "День")))
+    print(re.sub(r"<[^>]+>", "", fmt_day(g, d, "День")))
 
 
 def main():
     if hasattr(sys.stdout, "reconfigure"):
-        sys.stdout.reconfigure(encoding="utf-8")
+        sys.stdout.reconfigure(encoding="utf-8"); sys.stderr.reconfigure(encoding="utf-8")
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
-    sub.add_parser("update"); sub.add_parser("site")
-    n = sub.add_parser("notify"); n.add_argument("--mode", choices=["morning", "evening", "weekly", "watch"], default="watch")
-    s = sub.add_parser("show"); s.add_argument("--date")
+    r = sub.add_parser("run"); r.add_argument("--mode", default="auto", choices=["auto", "morning", "evening", "weekly", "none"])
+    s = sub.add_parser("show"); s.add_argument("group"); s.add_argument("--date")
     a = ap.parse_args()
-    {"update": cmd_update, "notify": cmd_notify, "show": cmd_show, "site": lambda _a: build_site()}[a.cmd](a)
+    {"run": cmd_run, "show": cmd_show}[a.cmd](a)
 
 
 if __name__ == "__main__":
