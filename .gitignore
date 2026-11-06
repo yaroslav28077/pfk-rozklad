@@ -5,3 +5,5 @@ node_modules/
 # генерується в GitHub Actions і публікується на Pages (у репозиторій не комітимо)
 docs/data/
 docs/ics/
+.pytest_cache/
+.rozklad-state.json

@@ -296,6 +296,8 @@ async function init() {
     return;
   }
   $("#checked").textContent = INDEX.updated ? `Дані оновлено ${INDEX.updated.slice(8, 10)}.${INDEX.updated.slice(5, 7)} о ${INDEX.updated.slice(11, 16)}` : "";
+  const down = INDEX.source_down_since; // сайт коледжу не відповідає — показуємо останній отриманий розклад
+  if (down) $("#checked").textContent += ` · ⚠️ сайт коледжу недоступний з ${down.slice(8, 10)}.${down.slice(5, 7)} ${down.slice(11, 16)}, показано останній отриманий розклад`;
   $("#src").href = INDEX.source_page;
   document.querySelectorAll(".tabbar button").forEach((b) => b.addEventListener("click", () => {
     if (!SITE) return;

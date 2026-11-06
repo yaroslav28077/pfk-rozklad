@@ -1,19 +1,27 @@
 #!/usr/bin/env python3
 """Бот розкладу ПФК НЮУ для всіх груп і курсів.
 
-  python scripts/bot.py run                 # усе разом (так запускає GitHub Actions щогодини)
-  python scripts/bot.py run --mode morning  # примусово надіслати ранкову розсилку (тест)
+  python scripts/bot.py run                 # усе разом: update + notify (локально)
+  python scripts/bot.py update              # 1) отримати PDF, розібрати, зібрати сайт (GitHub Actions)
+  python scripts/bot.py notify              # 2) розсилки й сповіщення адміну (після деплою сайту)
+  python scripts/bot.py run --mode morning --only <chat id>   # тестова ранкова розсилка лише в один чат
   python scripts/bot.py show СОБ-11 [--date 2026-11-03]
 
-Що робить `run`:
-  1. перевіряє сторінку «Розклад занять» на plc.nlu.edu.ua, завантажує нові PDF і сам їх розбирає
-     (розклад усіх курсів і «Зміни до розкладу») → data/sources/*.json;
-  2. будує сайт: docs/data/index.json, docs/data/g/<група>.json, docs/ics/<група>.ics;
-  3. розсилає в Telegram кожному підписнику розклад ЙОГО групи (список підписників — у Cloudflare Worker),
-     о morning_hour — на сьогодні, о evening_hour — на завтра (у неділю — тиждень),
-     а також одразу — нові заміни й новий розклад.
+Що робить `update`:
+  1. перевіряє сторінку «Розклад занять» на plc.nlu.edu.ua (з повторними спробами), завантажує PDF і розбирає
+     нові/змінені (розклад усіх курсів і «Зміни до розкладу») → data/sources/*.json.
+     Якщо сайт/PDF недоступний або PDF не розібрався — лишається останній робочий розклад, а проблема
+     потрапляє у звіт (адмін-повідомлення, червоний статус запуску). Невдалий PDF розбирається повторно
+     на кожному запуску, навіть якщо файл не змінився;
+  2. будує сайт: docs/data/index.json, docs/data/g/<група>.json, docs/ics/<група>.ics.
+Що робить `notify`:
+  3. розсилає в Telegram кожному підписнику розклад ЙОГО групи (список підписників — у Cloudflare Worker):
+     зранку — на сьогодні, увечері — на завтра (у неділю — тиждень), одразу — нові заміни й новий розклад.
+     Кожна розсилка позначається виконаною лише для тих, кому повідомлення справді дійшло (стан — у KV воркера),
+     тож запізнілий чи повторний запуск не шле дублів, а невдалі відправки повторюються;
+  4. повідомляє адміна (TELEGRAM_CHAT_ID) про збій і про відновлення — без повторів щогодини.
 
-Змінні середовища: TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID (адмін: технічні помилки), SITE_URL.
+Змінні середовища: TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID (адмін: технічні помилки), SITE_URL, ROZKLAD_STATE.
 """
 import argparse
 import hashlib
@@ -28,6 +36,7 @@ import urllib.request
 from datetime import date, datetime, timedelta
 from html import escape
 from html.parser import HTMLParser
+from http.client import HTTPException
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -50,6 +59,17 @@ TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
 ADMINS = [c.strip() for c in os.environ.get("TELEGRAM_CHAT_ID", "").split(",") if c.strip()]
 SITE = (os.environ.get("SITE_URL") or CFG.get("site_url") or "").rstrip("/") + "/"
 WORKER_URL = (os.environ.get("WORKER_URL") or CFG.get("worker_url") or "").rstrip("/")
+# мережа: обмежені повтори лише для тимчасових збоїв (тайм-аут, обрив, 5xx, 429)
+RETRY_STATUS = {408, 425, 429, 500, 502, 503, 504, 520, 521, 522, 523, 524}
+PAGE_TRY = (3, 30, (10, 30))   # спроб, тайм-аут (с), паузи між спробами (с) — сторінка розкладу
+PDF_TRY = (3, 60, (5, 15))     # те саме для кожного PDF
+SLEEP = time.sleep             # підміняється в тестах
+# розсилки за розкладом: слот години h відправляється в будь-якому запуску від h до *_until (GitHub запізнюється)
+MORNING_UNTIL = int(CFG.get("morning_until", 13))
+EVENING_UNTIL = int(CFG.get("evening_until", 23))
+SEND_TRIES = 4      # скільки запусків поспіль повторювати відправку тим, кому не дійшло
+REMIND_HOURS = 24   # нагадування адміну про незакритий збій — не частіше
+DEFAULTS = {"m": 1, "e": 1, "c": 1, "w": 1, "s": 0, "sg": 0, "mh": CFG.get("morning_hour", 6), "eh": CFG.get("evening_hour", 18)}
 
 
 def log(*a):
@@ -74,6 +94,24 @@ def today():
     return now().date()
 
 
+def stamp(t=None):
+    return (t or now()).isoformat(timespec="minutes")
+
+
+def hours_since(iso):
+    try:
+        return (now() - datetime.fromisoformat(iso)).total_seconds() / 3600
+    except (TypeError, ValueError):
+        return 1e9
+
+
+def ddmm_hm(iso):
+    try:
+        return datetime.fromisoformat(iso).astimezone(TZ).strftime("%d.%m %H:%M")
+    except (TypeError, ValueError):
+        return str(iso)
+
+
 TR = dict(zip("абвгґдеєжзиіїйклмнопрстуфхцчшщьюя", "a b v h g d e ie zh z y i i i k l m n o p r s t u f kh ts ch sh shch  iu ia".split(" ")))
 
 
@@ -88,10 +126,36 @@ def secret():
 
 
 # ---------------------------------------------------------------- сайт коледжу
-def http(url, data=None, headers=None, timeout=60):
-    req = urllib.request.Request(url, data=data, headers={**UA, **(headers or {})})
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        return r.read()
+def describe(e):
+    """Коротко й зрозуміло: що саме сталося з запитом."""
+    if isinstance(e, urllib.error.HTTPError):
+        return f"HTTP {e.code}"
+    if isinstance(e, urllib.error.URLError):
+        e = e.reason
+    if isinstance(e, TimeoutError) or "timed out" in str(e):
+        return "тайм-аут (сервер не відповідає)"
+    return f"{type(e).__name__}: {e}" if str(e) else type(e).__name__
+
+
+def http(url, data=None, headers=None, timeout=60, tries=None):
+    """GET/POST. tries=(спроб, тайм-аут, паузи) — повтор лише для тимчасових збоїв; 4xx повертається одразу."""
+    attempts, timeout, pauses = tries or (1, timeout, ())
+    for i in range(attempts):
+        req = urllib.request.Request(url, data=data, headers={**UA, **(headers or {})})
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                return r.read()
+        except urllib.error.HTTPError as e:
+            if e.code not in RETRY_STATUS or i == attempts - 1:
+                raise
+            err = e
+        except (OSError, HTTPException) as e:  # URLError, тайм-аут, обрив з'єднання, неповна відповідь
+            if i == attempts - 1:
+                raise
+            err = e
+        pause = pauses[min(i, len(pauses) - 1)] if pauses else 5
+        log(f"  {describe(err)} — повтор {i + 2}/{attempts} через {pause} с")
+        SLEEP(pause)
 
 
 class Links(HTMLParser):
@@ -128,13 +192,49 @@ def page_url():
     return urllib.parse.urlunsplit((p.scheme, p.netloc, urllib.parse.quote(urllib.parse.unquote(p.path)), p.query, ""))
 
 
+def load_sources():
+    return {p.stem: jload(p, {}) for p in sorted(SRC.glob("*.json"))}
+
+
+def parse_pdf(kind, pdf, title, old_data=None):
+    """Розбір + перевірка на правдоподібність. Будь-яка помилка → PDF вважається нерозібраним."""
+    if kind != "schedule":
+        rows = parse.parse_changes(pdf)
+        if not rows:
+            raise ValueError("не знайдено жодного рядка замін")
+        return rows
+    d = parse.parse_schedule(pdf, title)
+    if not d.get("items"):
+        raise ValueError("не знайдено жодної пари")
+    if not d.get("groups"):
+        raise ValueError("не знайдено жодної групи")
+    if d["from"] > d["to"]:
+        raise ValueError(f"некоректний період {d['from']}…{d['to']}")
+    if old_data and old_data.get("items") and len(d["items"]) < 0.3 * len(old_data["items"]):
+        raise ValueError(f"знайдено лише {len(d['items'])} пар проти {len(old_data['items'])} у попередній версії — схоже на збій розбору")
+    return d
+
+
 def update():
-    """Завантажує нові/змінені PDF і розбирає їх. Повертає список подій для розсилки."""
-    known = {p.stem: jload(p, {}) for p in SRC.glob("*.json")}
+    """Завантажує PDF і розбирає нові/змінені/раніше нерозібрані.
+
+    Повертає (sources, events, problems, unchecked):
+      problems  — [{id, text, url}] поточні збої (сайт, завантаження PDF, розбір PDF);
+      unchecked — префікси id проблем, які цього разу неможливо було перевірити (щоб не оголосити їх «вирішеними»).
+    Робочі дані ніколи не замінюються порожніми чи зламаними: при збої лишається остання вдала версія.
+    """
+    known = load_sources()
     bootstrap = not known
-    html = http(page_url()).decode("utf-8", "replace")
+    events, problems = [], []
+    try:
+        html = http(page_url(), tries=PAGE_TRY).decode("utf-8", "replace")
+    except Exception as e:  # noqa: BLE001
+        problems.append({"id": "site", "text": f"Сайт коледжу недоступний: {describe(e)}", "url": PAGE})
+        for rec in known.values():
+            rec["on_page"] = True
+        return known, events, problems, {"pdf:", "parse:", "nopdf"}
     p = Links(); p.feed(html)
-    events, on_page, seen = [], set(), set()
+    on_page, seen, unchecked = set(), set(), set()
     for text, href in p.links:
         kind = classify(text, href)
         if not kind:
@@ -146,42 +246,57 @@ def update():
         fname = Path(urllib.parse.unquote(urllib.parse.urlsplit(url).path)).stem
         key = re.sub(r"[^\w\-.]+", "_", fname)
         on_page.add(key)
+        title = text or fname
         try:
-            pdf = http(url)
+            pdf = http(url, tries=PDF_TRY)
         except Exception as e:  # noqa: BLE001
-            log(f"ERR завантаження {fname}: {e}"); continue
+            problems.append({"id": f"pdf:{key}", "text": f"Не вдалося завантажити PDF «{title}»: {describe(e)}", "url": url})
+            unchecked.add(f"parse:{key}")
+            continue
         h = hashlib.sha256(pdf).hexdigest()
         old = known.get(key, {})
-        if old.get("sha256") == h:
+        good = old.get("data") if "data" in old else None
+        if good is not None and old.get("sha256") == h:  # уже розібрано, файл не змінився
+            if old.pop("failed", None):  # коледж повернув робочу версію файлу
+                jsave(SRC / f"{key}.json", old)
             continue
-        rec = {"file": fname, "title": text or fname, "url": url, "kind": kind, "sha256": h,
-               "first_seen": old.get("first_seen") or now().isoformat(timespec="minutes"),
-               "updated": now().isoformat(timespec="minutes")}
+        # сюди потрапляє: новий файл, змінений файл, або файл, який минулого разу не розібрався (повтор)
         try:
-            if kind == "schedule":
-                rec["data"] = parse.parse_schedule(pdf, text)
-                if not rec["data"]["items"]:
-                    raise ValueError("не знайдено жодної пари")
-            else:
-                rec["data"] = parse.parse_changes(pdf)
+            data = parse_pdf(kind, pdf, title, good if kind == "schedule" else None)
         except Exception as e:  # noqa: BLE001
-            rec["error"] = f"{type(e).__name__}: {e}"
-            events.append({"type": "error", "text": f"Не вдалося розібрати PDF «{text}»: {rec['error']}", "url": url})
+            err = f"{type(e).__name__}: {e}"
+            prev = old.get("failed") or ({"sha256": old.get("sha256"), "since": old.get("updated")} if "error" in old else {})
+            same = prev.get("sha256") == h
+            rec = {k: v for k, v in old.items() if k not in ("error", "failed")} if good is not None else {
+                "file": fname, "title": title, "url": url, "kind": kind, "first_seen": old.get("first_seen") or stamp()}
+            rec["failed"] = {"sha256": h, "error": err, "since": (prev.get("since") if same else None) or stamp(),
+                             "attempts": (prev.get("attempts", 1) + 1) if same else 1, "title": title, "url": url}
+            jsave(SRC / f"{key}.json", rec)
+            known[key] = rec
+            log(f"ERR розбору {fname} (спроба {rec['failed']['attempts']}): {err}")
+            keep = " Показую попередню версію цього файлу." if good is not None else ""
+            problems.append({"id": f"parse:{key}", "text": f"Не вдалося розібрати PDF «{title}»: {err}.{keep}", "url": url})
+            continue
+        rec = {"file": fname, "title": title, "url": url, "kind": kind, "sha256": h,
+               "first_seen": old.get("first_seen") or stamp(), "updated": stamp(), "data": data}
         jsave(SRC / f"{key}.json", rec)
         known[key] = rec
-        if bootstrap or "error" in rec:
+        if bootstrap:
             continue
+        ekey = f"{kind}:{key}:{h[:16]}"
         if kind == "schedule":
-            events.append({"type": "schedule", "course": rec["data"]["course"], "from": rec["data"]["from"],
-                           "to": rec["data"]["to"], "title": rec["title"], "url": url, "changed": bool(old)})
+            if good == data:  # файл перезалили без змін у розкладі — не турбуємо людей
+                continue
+            events.append({"type": "schedule", "key": ekey, "course": data["course"], "from": data["from"],
+                           "to": data["to"], "title": title, "url": url, "changed": good is not None})
         else:
-            prev = {json.dumps(z, sort_keys=True, ensure_ascii=False) for z in old.get("data", [])}
-            fresh = [z for z in rec["data"] if json.dumps(z, sort_keys=True, ensure_ascii=False) not in prev
+            prev = {json.dumps(z, sort_keys=True, ensure_ascii=False) for z in good or []}
+            fresh = [z for z in data if json.dumps(z, sort_keys=True, ensure_ascii=False) not in prev
                      and z["date"] >= today().isoformat()]
             if fresh:
-                events.append({"type": "changes", "rows": fresh, "title": rec["title"], "url": url})
+                events.append({"type": "changes", "key": ekey, "rows": fresh, "title": title, "url": url})
     if not seen:
-        events.append({"type": "error", "text": "На сторінці розкладу не знайдено жодного PDF — можливо, змінився сайт коледжу", "url": PAGE})
+        problems.append({"id": "nopdf", "text": "На сторінці розкладу не знайдено жодного PDF — можливо, змінився сайт коледжу", "url": PAGE})
     # прибираємо старі PDF, яких уже немає на сайті
     limit = (today() - timedelta(days=KEEP_DAYS)).isoformat()
     for key, rec in list(known.items()):
@@ -193,7 +308,7 @@ def update():
             (SRC / f"{key}.json").unlink(missing_ok=True); known.pop(key)
     for k, rec in known.items():
         rec["on_page"] = k in on_page
-    return known, events
+    return known, events, problems, unchecked
 
 
 # ---------------------------------------------------------------- збірка даних по групах
@@ -263,8 +378,9 @@ def build(sources):
     return out, pdfs
 
 
-def write_site(out, pdfs, bot_name):
-    """docs/data/* і docs/ics/*. Повертає хеш вмісту (щоб не деплоїти сайт без змін)."""
+def write_site(out, pdfs, bot_name, status=None):
+    """docs/data/* і docs/ics/*. Повертає хеш вмісту (щоб не деплоїти сайт без змін).
+    status.source_down_since — з якого часу сайт коледжу недоступний (сайт покаже попередження)."""
     gdir, idir = DOCS / "data" / "g", DOCS / "ics"
     for d in (gdir, idir):
         d.mkdir(parents=True, exist_ok=True)
@@ -276,7 +392,8 @@ def write_site(out, pdfs, bot_name):
         jsave(gdir / f"{g['slug']}.json", g, compact=True)
         build_ics(g, idir / f"{g['slug']}.ics")
     index = {"college": CFG["college"], "short": CFG.get("short", ""), "bot": bot_name, "source_page": PAGE,
-             "bells": CFG["bells"], "courses": courses, "pdfs": pdfs}
+             "bells": CFG["bells"], "courses": courses, "pdfs": pdfs,
+             "source_down_since": (status or {}).get("source_down_since")}
     h = hashlib.sha256(json.dumps([index, out], ensure_ascii=False, sort_keys=True).encode()).hexdigest()[:16]
     index.update({"hash": h, "updated": now().isoformat(timespec="minutes")})
     jsave(DOCS / "data" / "index.json", index)
@@ -371,6 +488,7 @@ def fmt_week(g, monday, sg=0):
 
 # ---------------------------------------------------------------- Telegram і воркер
 def tg(method, payload):
+    """Виклик Bot API. Завжди повертає dict (ok/description/error_code/parameters), ніколи не кидає виняток."""
     req = urllib.request.Request(f"https://api.telegram.org/bot{TOKEN}/{method}", json.dumps(payload).encode(),
                                  {"Content-Type": "application/json"})
     for attempt in range(3):
@@ -378,70 +496,107 @@ def tg(method, payload):
             with urllib.request.urlopen(req, timeout=30) as r:
                 return json.loads(r.read())
         except urllib.error.HTTPError as e:
-            body = json.loads(e.read().decode() or "{}")
-            if e.code == 429 and attempt < 2:
-                time.sleep(body.get("parameters", {}).get("retry_after", 3) + 1); continue
+            try:
+                body = json.loads(e.read().decode("utf-8", "replace") or "{}")
+            except ValueError:  # 502 від проксі Telegram тощо — не JSON
+                body = {}
+            body = {"ok": False, "error_code": e.code, "description": f"HTTP {e.code}", **body}
+            if attempt < 2 and (e.code == 429 or e.code >= 500):
+                SLEEP(min(int((body.get("parameters") or {}).get("retry_after", 3)), 30) + 1); continue
             return body
         except Exception as e:  # noqa: BLE001
             if attempt == 2:
-                return {"ok": False, "description": str(e)}
-            time.sleep(2)
+                return {"ok": False, "description": describe(e)}
+            SLEEP(2)
+    return {"ok": False, "description": "невідома помилка"}
+
+
+MISSING = object()  # сховище стану недоступне / старий воркер без /api/state
 
 
 class Worker:
-    """Список підписників і «один раз» — живуть у Cloudflare Worker (KV). URL беремо з вебхука бота."""
+    """Підписники (KV), стан розсилок і heartbeat — у Cloudflare Worker. URL беремо з config.json або вебхука."""
 
     def __init__(self):
         self.url = WORKER_URL or None
+        self.errors = []
         if TOKEN and not self.url:
             info = tg("getWebhookInfo", {}) or {}
             u = (info.get("result") or {}).get("url") or ""
             self.url = u.rstrip("/") or None
 
-    def call(self, path, body=None):
+    def call(self, path, body=None, quiet404=False):
         if not self.url:
             return None
+        data = json.dumps(body).encode() if body is not None else None
         try:
-            data = json.dumps(body).encode() if body is not None else None
-            r = http(self.url + path, data=data, timeout=30,
+            r = http(self.url + path, data=data, tries=(3, 30, (3, 10)),
                      headers={"Authorization": f"Bearer {secret()}", "Content-Type": "application/json"})
             return json.loads(r)
+        except urllib.error.HTTPError as e:
+            if e.code == 404 and quiet404:
+                return MISSING
+            self.errors.append(f"{path}: {describe(e)}")
         except Exception as e:  # noqa: BLE001
-            log(f"Воркер {path}: {e}")
-            return None
+            self.errors.append(f"{path}: {describe(e)}")
+        log(f"Воркер {self.errors[-1]}")
+        return None
 
     def users(self):
         r = self.call("/api/users")
         return r.get("users") if isinstance(r, dict) else None
 
     def once(self, key):
-        """True, якщо ця подія ще не відбувалась (захист від дублів, коли GitHub запускає двічі)."""
+        """Стара модель: True, якщо подія ще не відбувалася (ключ ставиться ДО відправки)."""
         r = self.call("/api/once", {"key": key})
-        return True if r is None else bool(r.get("first"))
+        return None if r is None else bool(r.get("first"))
+
+    def get(self, key):
+        """Стан розсилки: dict (вже була), {} (ще не було) або MISSING (воркер недоступний чи старий)."""
+        r = self.call("/api/state/get", {"keys": [key]}, quiet404=True)
+        if r is MISSING or not isinstance(r, dict):
+            return MISSING
+        v = (r.get("values") or {}).get(key)
+        return v if isinstance(v, dict) else {}
+
+    def put(self, key, value, ttl):
+        r = self.call("/api/state/set", {"key": key, "value": value, "ttl": ttl}, quiet404=True)
+        return isinstance(r, dict) and r.get("ok")
 
 
 def broadcast(users, make_text, kb=None):
-    """make_text(user) → текст або None. Повертає id чатів, які заблокували бота."""
-    gone, sent = [], 0
+    """make_text(user) → текст або None (не надсилати). Повертає {sent, failed, gone, moved}:
+    failed — тимчасові збої (варто повторити), gone — бота заблокували / чату немає, moved — група стала супергрупою."""
+    res = {"sent": [], "failed": [], "gone": [], "moved": {}, "rejected": []}
     for u in users:
         text = make_text(u)
         if not text:
             continue
-        p = {"chat_id": u["id"], "text": text, "parse_mode": "HTML", "link_preview_options": {"is_disabled": True},
+        cid = u["id"]
+        p = {"chat_id": cid, "text": text, "parse_mode": "HTML", "link_preview_options": {"is_disabled": True},
              "disable_notification": bool(int(u.get("s") or 0))}
-        if kb:
+        if kb and kb(u):
             p["reply_markup"] = kb(u)
         r = tg("sendMessage", p) or {}
+        new_id = (r.get("parameters") or {}).get("migrate_to_chat_id")
+        if not r.get("ok") and new_id:  # групу перетворили на супергрупу — шлемо на новий id і переносимо підписку
+            res["moved"][str(cid)] = str(new_id)
+            p["chat_id"] = new_id
+            r = tg("sendMessage", p) or {}
         if r.get("ok"):
-            sent += 1
+            res["sent"].append(str(cid))
         else:
-            desc = r.get("description", "")
-            log(f"…{str(u['id'])[-4:]}: {desc}")
-            if r.get("error_code") in (400, 403) and re.search(r"blocked|deactivated|not found|kicked|PEER_ID", desc, re.I):
-                gone.append(u["id"])
-        time.sleep(0.05)
-    log(f"Надіслано: {sent}")
-    return gone
+            desc, code = r.get("description", ""), r.get("error_code")
+            log(f"…{str(cid)[-4:]}: {code} {desc}")
+            if code in (400, 403) and re.search(r"blocked|deactivated|not found|kicked|PEER_ID|chat_id is empty", desc, re.I):
+                res["gone"].append(str(cid))
+            elif code == 400:  # Telegram відхилив саме повідомлення — повтор не допоможе
+                res["rejected"].append(str(cid))
+            else:  # мережа, 429, 5xx — повторимо в наступному запуску
+                res["failed"].append(str(cid))
+        SLEEP(0.05)
+    log(f"Надіслано: {len(res['sent'])}" + (f", не дійшло: {len(res['failed'])}" if res["failed"] else ""))
+    return res
 
 
 def site_kb(g):
@@ -451,89 +606,230 @@ def site_kb(g):
                                  {"text": "📲 У календар", "url": f"{SITE}ics/{g['slug']}.ics"}]]}
 
 
-def notify(out, events, mode):
+class Delivery:
+    """«Рівно один раз» для кожної розсилки (ключ), з повтором для тих, кому не дійшло.
+
+    Стан у KV воркера: {"failed": [chat id], "tries": n}. Записується ПІСЛЯ відправки — тож збій посеред запуску
+    не позначає розсилку виконаною. Зі старим воркером (без /api/state) — колишня поведінка через /api/once."""
+
+    def __init__(self, w):
+        self.w, self.total = w, {"sent": [], "failed": [], "gone": [], "moved": {}, "rejected": []}
+        self.problems = []
+
+    def _merge(self, r):
+        for k in ("sent", "failed", "gone", "rejected"):
+            self.total[k] += r[k]
+        self.total["moved"].update(r["moved"])
+
+    def run(self, key, users, make_text, kb, ttl=3 * 86400, force=False):
+        tries = 0
+        if not force and self.w.url:
+            st = self.w.get(key)
+            if st is MISSING:
+                first = self.w.once(key)
+                if first is None:  # воркер недоступний — краще пропустити зараз і надіслати в наступному запуску
+                    self.problems.append(key)
+                    return
+                if not first:
+                    return
+                self._merge(broadcast(users, make_text, kb))
+                return
+            if st:
+                left = {str(x) for x in st.get("failed") or []}
+                tries = int(st.get("tries") or 1)
+                if not left or tries >= SEND_TRIES:
+                    return
+                users = [u for u in users if str(u["id"]) in left]
+        r = broadcast(users, make_text, kb)
+        self._merge(r)
+        if not force and self.w.url:
+            if not self.w.put(key, {"failed": r["failed"], "tries": tries + 1, "at": stamp()}, ttl):
+                log(f"Не вдалося зберегти стан розсилки {key} — можливий дубль у наступному запуску")
+                self.problems.append(key)
+
+
+def notify(out, events, mode, only=None, stale_since=None):
+    """Розсилки. Повертає список технічних проблем (для звіту адміну)."""
+    problems = []
     if not TOKEN:
         log("TELEGRAM_BOT_TOKEN не задано — розсилку пропущено")
-        return
+        return problems
     w = Worker()
     users = w.users()
-    if users is None:  # воркер ще не налаштовано — як раніше: шлемо в TELEGRAM_CHAT_ID для default_group
-        log("Воркер недоступний — розсилка лише в TELEGRAM_CHAT_ID")
+    if users is None and w.url:
+        problems.append({"id": "worker", "text": "Не вдалося отримати список підписників з Cloudflare Worker: "
+                         + "; ".join(w.errors[-2:]) + ". Розсилки цього запуску відкладено.", "url": w.url})
+        return problems
+    if users is None:  # воркер не налаштовано — як раніше: шлемо в TELEGRAM_CHAT_ID для default_group
+        log("Воркер не налаштовано — розсилка лише в TELEGRAM_CHAT_ID")
         users = [{"id": c, "g": CFG.get("default_group")} for c in ADMINS]
-    else:
-        known = {str(u["id"]) for u in users}
-        for c in ADMINS:  # автоматично переносимо старий чат у список підписників
-            if c not in known and w.once(f"migrate:{c}"):
-                w.call("/api/add", {"id": c, "g": CFG.get("default_group")})
-                users.append({"id": c, "g": CFG.get("default_group")})
+    users = [{**DEFAULTS, **u} for u in users]
+    if only:  # тестовий запуск: лише вказані чати (якщо чат не підписаний — з default_group)
+        byid = {str(u["id"]): u for u in users}
+        test_users = [byid.get(str(c)) or {**DEFAULTS, "id": c, "g": CFG.get("default_group")} for c in only]
     t, h = today(), now().hour
-    gone = []
+    D = Delivery(w)
     G = lambda u: out.get(u.get("g") or "")  # noqa: E731
     kb = lambda u: site_kb(G(u))  # noqa: E731
     on = lambda u, k: int(u.get(k, 1) or 0)  # noqa: E731
     sg = lambda u: int(u.get("sg") or 0)  # noqa: E731
+    note = (f"\n\n<i>⚠️ Сайт коледжу зараз недоступний (з {ddmm_hm(stale_since)}), це останній отриманий розклад.</i>"
+            if stale_since else "")
+    glist = [{"name": n, "course": g["course"]} for n, g in out.items()]
 
-    def due(name, key, default):
-        """Підписники, яким саме зараз час для розсилки `name` (у кожного своя година u[key]).
-        GitHub інколи запускає із запізненням — тож вікно 2 години, а дублі відсікає воркер (once)."""
-        if mode == name:
-            return users
+    def scheduled(name, key, default, until, make):
+        if mode == name:  # примусова (тестова) розсилка
+            D.run(f"{name}:{t}:force", test_users if only else users, make, kb, force=True)
+            return
         if mode != "auto":
-            return []
-        res = []
-        for slot in ((h, h - 1) if w.url else (h,)):
+            return
+        if h >= until:  # надто пізно: ранкова о 15:00 чи вечірня після 23:00 вже не має сенсу
+            return
+        for slot in sorted({int(u.get(key) or default) for u in users}):
+            # слот 06:00 обслуговує будь-який запуск 06:00…until (запуски GitHub запізнюються на години);
+            # без воркера — лише запуск у ту саму годину, як раніше
+            if not (slot <= h if w.url else slot == h):
+                continue
             batch = [u for u in users if int(u.get(key) or default) == slot]
-            if batch and w.once(f"{name}:{t}:{slot}"):
-                res += batch
-        return res
+            D.run(f"{name}:{t}:{slot}", batch, make, kb)
 
-    batch = due("morning", "mh", CFG["morning_hour"])
-    if batch:
-        gone += broadcast(batch, lambda u: G(u) and on(u, "m") and t.isoformat() in G(u)["days"]
-                          and fmt_day(G(u), t, "Сьогодні", sg(u)), kb)
-    batch = due("evening", "eh", CFG["evening_hour"])
-    if batch:
-        tm = t + timedelta(days=1)
-        mon = t + timedelta(days=7 - t.weekday())
-
-        def evening(u):
-            g = G(u)
-            if not g:
-                return None
-            if t.weekday() == 6 and on(u, "w"):  # неділя — огляд наступного тижня
-                return fmt_week(g, mon, sg(u))
-            if t.weekday() != 5 and on(u, "e") and tm.isoformat() in g["days"]:
-                return fmt_day(g, tm, "Завтра", sg(u))
+    def morning(u):
+        g = G(u)
+        if not g or not on(u, "m") or t.isoformat() not in g["days"]:
             return None
-        gone += broadcast(batch, evening, kb)
+        return fmt_day(g, t, "Сьогодні", sg(u)) + note
+
+    tm = t + timedelta(days=1)
+    next_mon = t + timedelta(days=7 - t.weekday())
+
+    def evening(u):
+        g = G(u)
+        if not g:
+            return None
+        if t.weekday() == 6:  # неділя — огляд наступного тижня, якщо його вже опубліковано
+            if on(u, "w") and any((next_mon + timedelta(days=i)).isoformat() in g["days"] for i in range(6)):
+                return fmt_week(g, next_mon, sg(u)) + note
+            if on(u, "w"):
+                return None
+        if t.weekday() != 5 and on(u, "e") and tm.isoformat() in g["days"]:
+            return fmt_day(g, tm, "Завтра", sg(u)) + note
+        return None
+
+    scheduled("morning", "mh", DEFAULTS["mh"], MORNING_UNTIL, morning)
+    scheduled("evening", "eh", DEFAULTS["eh"], EVENING_UNTIL, evening)
     if mode == "weekly":
-        mon = t - timedelta(days=t.weekday()) if t.weekday() < 5 else t + timedelta(days=7 - t.weekday())
-        gone += broadcast(users, lambda u: G(u) and fmt_week(G(u), mon, sg(u)), kb)
+        mon = t - timedelta(days=t.weekday()) if t.weekday() < 5 else next_mon
+        D.run(f"weekly:{t}:force", test_users if only else users, lambda u: G(u) and fmt_week(G(u), mon, sg(u)) + note, kb, force=True)
     for e in events:
         if e["type"] == "changes":
-            def txt(u, e=e):
+            targets = [(z, set(parse.change_targets(z["group"], glist))) for z in e["rows"]]
+
+            def txt(u, targets=targets):
                 g = G(u)
                 if not g or not on(u, "c"):
                     return None
-                mine = [z for z in e["rows"] if g["group"] in parse.change_targets(z["group"], [{"name": g["group"], "course": g["course"]}])]
-                if not mine:
+                mine_rows = [z for z, gs in targets if g["group"] in gs]
+                if not mine_rows:
                     return None
                 rows = "\n".join(f"• {date.fromisoformat(z['date']):%d.%m} ({SHORTD[date.fromisoformat(z['date']).weekday()]}), {z['pair']} пара: "
                                  + ("<b>вікно</b>" if z["subject"].lower() == "вікно" else escape(z["subject"] + (f", {z['teacher']}" if z.get("teacher") else "")))
-                                 for z in mine)
+                                 for z in mine_rows)
                 return f"🔔 <b>Нові заміни</b> · {escape(g['group'])}\n\n{rows}"
-            gone += broadcast(users, txt, kb)
+            D.run("ev:" + e["key"], users, txt, kb, ttl=14 * 86400)
         elif e["type"] == "schedule":
             d0 = date.fromisoformat(e["from"])
             mon = d0 - timedelta(days=d0.weekday())
             word = "Оновлено розклад" if e.get("changed") else "Новий розклад"
-            gone += broadcast(users, lambda u, e=e: G(u) and G(u)["course"] == e["course"] and on(u, "c")
-                              and f"🆕 <b>{word}</b> ({date.fromisoformat(e['from']):%d.%m}–{date.fromisoformat(e['to']):%d.%m})\n\n" + fmt_week(G(u), mon, sg(u)), kb)
-        elif e["type"] == "error" and ADMINS:
-            for c in ADMINS:
-                tg("sendMessage", {"chat_id": c, "text": f"⚠️ {e['text']}\n{e.get('url', '')}"})
-    if gone and w.url:
-        w.call("/api/drop", {"ids": gone})
+            D.run("ev:" + e["key"], users, lambda u, e=e, mon=mon, word=word: G(u) and G(u)["course"] == e["course"] and on(u, "c")
+                  and f"🆕 <b>{word}</b> ({date.fromisoformat(e['from']):%d.%m}–{date.fromisoformat(e['to']):%d.%m})\n\n" + fmt_week(G(u), mon, sg(u)),
+                  kb, ttl=14 * 86400)
+    tot = D.total
+    if w.url and tot["gone"]:
+        w.call("/api/drop", {"ids": tot["gone"]})
+    for old, new in tot["moved"].items():
+        if w.url:
+            w.call("/api/move", {"from": old, "to": new}, quiet404=True)
+    if D.problems:
+        problems.append({"id": "state", "text": "Сховище стану розсилок у воркері недоступне: " + "; ".join(w.errors[-2:])
+                         + ". Частину розсилок відкладено до наступного запуску.", "url": w.url or ""})
+    if tot["failed"]:
+        log(f"::warning::Не дійшло {len(tot['failed'])} повідомлень — повтор у наступному запуску")
+    return problems
+
+
+# ---------------------------------------------------------------- стан збоїв і адмін-повідомлення
+def health_path():
+    return DATA / "health.json"
+
+
+def report(problems, unchecked=(), send=True):
+    """Порівнює поточні збої з попереднім запуском: адміну — про новий збій, нагадування раз на REMIND_HOURS
+    і повідомлення про відновлення. Стан — data/health.json (комітиться). Не вдалося надіслати → повтор наступного разу."""
+    old = jload(health_path(), {}).get("issues", {})
+    cur, fresh, remind, fixed = {}, [], [], []
+    for p in problems:
+        o = old.get(p["id"]) or {}
+        if o.get("resolved"):  # збій повернувся раніше, ніж ми встигли повідомити про відновлення
+            o = {k: v for k, v in o.items() if k != "resolved"}
+        # текст першої помилки не переписуємо щоразу (тайм-аут/обрив чергуються) — інакше коміт data/ щогодини
+        st = {"text": o.get("text") or p["text"], "url": p.get("url", ""), "since": o.get("since") or stamp(), "alerted": o.get("alerted")}
+        if not st["alerted"]:
+            fresh.append(st)
+        elif hours_since(st["alerted"]) >= REMIND_HOURS:
+            remind.append(st)
+        cur[p["id"]] = st
+    for pid, o in old.items():
+        if pid in cur:
+            continue
+        if any(pid == x or (x.endswith(":") and pid.startswith(x)) for x in unchecked):  # не перевірялося — лишаємо як було
+            cur[pid] = o
+        elif o.get("alerted"):
+            fixed.append((pid, o))
+    lines = []
+    if fresh:
+        lines += ["⚠️ <b>Розклад ПФК: проблема</b>"] + [f"• {escape(s['text'])}" + (f"\n  {escape(s['url'])}" if s["url"] else "") for s in fresh]
+    if remind:
+        lines += ["⏳ <b>Досі не вирішено</b>"] + [f"• {escape(s['text'])} (з {ddmm_hm(s['since'])})" for s in remind]
+    if fresh or remind:
+        lines.append("<i>Бот і сайт показують останній успішно отриманий розклад. Нагадаю не раніше ніж через "
+                     f"{REMIND_HOURS} год, а коли запрацює — напишу.</i>")
+    if fixed:
+        def back(pid, o):
+            hrs = max(1, round(hours_since(o.get("since"))))
+            what = {"site": "Сайт коледжу знову доступний", "worker": "Воркер знову відповідає",
+                    "state": "Сховище стану розсилок знову працює", "nopdf": "PDF на сторінці розкладу знову знайдено"}.get(pid)
+            if not what:
+                what = ("PDF знову завантажується" if pid.startswith("pdf:") else "PDF розібрано") + f": {o.get('text', '').split('«')[-1].split('»')[0]}"
+            return f"• {escape(what)} (збій тривав ~{hrs} год, з {ddmm_hm(o.get('since'))})"
+        lines += ["✅ <b>Розклад ПФК: відновлено</b>"] + [back(pid, o) for pid, o in fixed]
+    delivered = False
+    tried = bool(lines and send and TOKEN and ADMINS)
+    if tried:
+        text = "\n".join(lines)
+        for c in ADMINS:
+            r = tg("sendMessage", {"chat_id": c, "text": text, "parse_mode": "HTML", "link_preview_options": {"is_disabled": True}})
+            delivered = delivered or bool(r.get("ok"))
+            if not r.get("ok"):
+                log(f"Адмін-повідомлення не дійшло: {r.get('description')}")
+    elif lines:
+        log("Адмін-повідомлення (не надіслано — немає TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID):\n" + re.sub(r"<[^>]+>", "", "\n".join(lines)))
+    if delivered:
+        for s in fresh + remind:
+            s["alerted"] = stamp()
+    elif tried:  # про відновлення не вдалося повідомити — лишаємо запис, спробуємо наступного разу
+        for pid, o in fixed:
+            cur[pid] = {**o, "resolved": True}
+    new = {"issues": cur}
+    if new != jload(health_path(), {}):
+        jsave(health_path(), new)
+    return cur
+
+
+def issue_since(pid, problems):
+    """Час початку збою (з попередніх запусків), якщо він триває зараз."""
+    if not any(p["id"] == pid for p in problems):
+        return None
+    return (jload(health_path(), {}).get("issues", {}).get(pid) or {}).get("since") or stamp()
 
 
 def ensure_webhook():
@@ -551,7 +847,7 @@ def setup_bot():
     """Меню команд і опис бота (раз на добу; BotFather вручну не потрібен)."""
     me = (tg("getMe", {}) or {}).get("result") or {}
     w = Worker()
-    if w.url and not w.once(f"setup:{today()}"):
+    if w.url and w.once(f"setup:{today()}") is False:
         return me.get("username", "")
     tg("setMyCommands", {"commands": [
         {"command": "today", "description": "Пари сьогодні"},
@@ -579,30 +875,100 @@ def deployed_hash():
         return None
 
 
-def cmd_run(a):
-    try:
-        sources, events = update()
-    except Exception as e:  # noqa: BLE001  сайт коледжу недоступний — працюємо з тим, що є
-        log(f"Сайт коледжу недоступний: {e}")
-        sources = {p.stem: jload(p, {}) for p in SRC.glob("*.json")}
-        for k, rec in sources.items():
-            rec["on_page"] = True
-        events = []
-    out, pdfs = build(sources)
-    if TOKEN:
-        ensure_webhook()
-    bot_name = setup_bot() if TOKEN else ""
-    h = write_site(out, pdfs, bot_name)
-    changed = h != deployed_hash()
+def wait_deployed(h, timeout=240):
+    """Після деплою GitHub Pages чекаємо, поки сайт справді віддає нові дані (воркер бере дані звідти)."""
+    for _ in range(max(1, timeout // 15)):
+        if deployed_hash() == h:
+            log("Сайт уже віддає нові дані")
+            return True
+        SLEEP(15)
+    log("::warning::Сайт ще не віддає нові дані (кеш/деплой Pages) — кнопки в боті можуть кілька хвилин показувати старе")
+    return False
+
+
+def state_file(a):
+    return Path(getattr(a, "state", None) or os.environ.get("ROZKLAD_STATE") or (ROOT / ".rozklad-state.json"))
+
+
+def gh_output(**kv):
     if os.environ.get("GITHUB_OUTPUT"):
-        with open(os.environ["GITHUB_OUTPUT"], "a") as f:
-            f.write(f"deploy={'true' if changed or a.mode != 'auto' else 'false'}\n")
-    log(f"Груп: {len(out)}, PDF: {len(pdfs)}, подій: {len(events)}, сайт {'змінився' if changed else 'без змін'}")
-    notify(out, events, a.mode)
+        with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as f:
+            for k, v in kv.items():
+                f.write(f"{k}={v}\n")
+
+
+def summary(lines):
+    if os.environ.get("GITHUB_STEP_SUMMARY"):
+        with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as f:
+            f.write("\n".join(lines) + "\n")
+
+
+def cmd_update(a):
+    sources, events, problems, unchecked = update()
+    out, pdfs = build(sources)
+    status = {"source_down_since": issue_since("site", problems)}
+    if not out:  # нічого не розібралося — не затираємо робочий сайт порожнім
+        problems.append({"id": "empty", "text": "Після розбору не лишилося жодної групи — сайт не оновлено", "url": PAGE})
+        h, changed = None, False
+    else:
+        if TOKEN:
+            ensure_webhook()
+        bot_name = setup_bot() if TOKEN else ""
+        h = write_site(out, pdfs, bot_name, status)
+        changed = h != deployed_hash()
+    deploy = bool(out) and (changed or a.mode != "auto")
+    state = {"events": events, "problems": problems, "unchecked": sorted(unchecked), "hash": h, "deploy": deploy,
+             "stale_since": status["source_down_since"]}
+    jsave(state_file(a), state)
+    gh_output(deploy="true" if deploy else "false", degraded="true" if problems else "false")
+    log(f"Груп: {len(out)}, PDF: {len(pdfs)}, подій: {len(events)}, проблем: {len(problems)}, сайт {'змінився' if changed else 'без змін'}")
+    for p in problems:
+        log(f"::error::{p['text']}")
+    return state
+
+
+def cmd_notify(a, state=None):
+    state = state or jload(state_file(a), None)
+    if state is None:
+        sys.exit("Немає файла стану від `update` — спершу запусти update")
+    out, _ = build(load_sources())
+    if state.get("events") and state.get("deploy") and os.environ.get("PAGES_DEPLOYED") == "success" and state.get("hash"):
+        wait_deployed(state["hash"])
+    only = [c.strip() for c in (a.only or "").split(",") if c.strip()]
+    problems = list(state.get("problems") or [])
+    problems += notify(out, state.get("events") or [], a.mode, only=only, stale_since=state.get("stale_since"))
+    report(problems, state.get("unchecked") or [])
+    heartbeat(problems)
+    gh_output(degraded="true" if problems else "false")
+    lines = ["### Розклад ПФК", f"- подій (новий розклад / заміни): {len(state.get('events') or [])}"]
+    lines += [f"- ❌ {p['text']}" for p in problems] or ["- ✅ збоїв немає"]
+    summary(lines)
+    if problems:
+        log("Перевірка завершилась зі збоями: " + "; ".join(p["text"] for p in problems))
+    return problems
+
+
+def heartbeat(problems):
+    """Сигнал «запуск відбувся» для зовнішнього контролю (cron воркера) — він напише адміну, якщо запуски зникнуть."""
+    if not TOKEN:
+        return
+    w = Worker()
+    if w.url:
+        run = (f"{os.environ.get('GITHUB_SERVER_URL', 'https://github.com')}/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{os.environ['GITHUB_RUN_ID']}"
+               if os.environ.get("GITHUB_RUN_ID") and os.environ.get("GITHUB_REPOSITORY") else "")
+        w.call("/api/heartbeat", {"admins": ADMINS, "degraded": bool(problems), "run": run,
+                                  "repo": os.environ.get("GITHUB_REPOSITORY", "")}, quiet404=True)
+
+
+def cmd_run(a):
+    state = cmd_update(a)
+    problems = cmd_notify(a, state)
+    if problems and a.strict:
+        sys.exit(2)
 
 
 def cmd_show(a):
-    sources = {p.stem: jload(p, {}) for p in SRC.glob("*.json")}
+    sources = load_sources()
     for rec in sources.values():
         rec["on_page"] = True
     out, _ = build(sources)
@@ -618,10 +984,16 @@ def main():
         sys.stdout.reconfigure(encoding="utf-8"); sys.stderr.reconfigure(encoding="utf-8")
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
-    r = sub.add_parser("run"); r.add_argument("--mode", default="auto", choices=["auto", "morning", "evening", "weekly", "none"])
+    modes = ["auto", "morning", "evening", "weekly", "none"]
+    for name in ("run", "update", "notify"):
+        r = sub.add_parser(name)
+        r.add_argument("--mode", default="auto", choices=modes)
+        r.add_argument("--state", help="файл стану між update і notify (типово $ROZKLAD_STATE)")
+        r.add_argument("--only", default="", help="лише для morning/evening/weekly: chat id тестового чату (через кому)")
+        r.add_argument("--strict", action="store_true", help="run: код виходу 2, якщо були збої")
     s = sub.add_parser("show"); s.add_argument("group"); s.add_argument("--date")
     a = ap.parse_args()
-    {"run": cmd_run, "show": cmd_show}[a.cmd](a)
+    {"run": cmd_run, "update": cmd_update, "notify": cmd_notify, "show": cmd_show}[a.cmd](a)
 
 
 if __name__ == "__main__":
