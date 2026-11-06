@@ -41,8 +41,9 @@ jobs:
   update:
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    # публікація сайту — лише з main; запуск з іншої гілки (тест PR) сайт не чіпає
     environment:
-      name: github-pages
+      name: ${{ github.ref_name == 'main' && 'github-pages' || '' }}
       url: ${{ steps.deploy.outputs.page_url }}
     env:
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
@@ -84,16 +85,16 @@ jobs:
         run: python scripts/bot.py update --mode "$MODE"
 
       - uses: actions/configure-pages@v5
-        if: steps.bot.outputs.deploy == 'true'
+        if: steps.bot.outputs.deploy == 'true' && github.ref_name == 'main'
 
       - uses: actions/upload-pages-artifact@v3
-        if: steps.bot.outputs.deploy == 'true'
+        if: steps.bot.outputs.deploy == 'true' && github.ref_name == 'main'
         with:
           path: docs
 
       - name: Опублікувати сайт
         id: deploy
-        if: steps.bot.outputs.deploy == 'true'
+        if: steps.bot.outputs.deploy == 'true' && github.ref_name == 'main'
         uses: actions/deploy-pages@v4
 
       # після деплою: нові дані вже на сайті, тож кнопки бота (воркер читає Pages) показують те саме, що й розсилка
