@@ -1,0 +1,30 @@
+name: Тести
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+    paths: ["scripts/**", "worker/**", "tests/**", ".github/workflows/**"]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: scripts/requirements.txt
+      - run: pip install -r scripts/requirements.txt pytest
+      - name: Python (конвеєр бота, парсер на згенерованих PDF)
+        run: python -m pytest -q tests
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Worker (стан розсилок, watchdog)
+        run: node --test tests/worker.test.mjs

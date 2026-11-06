@@ -2,6 +2,9 @@ name: Розклад ПФК
 
 # Щогодини (05:20–21:20 за Києвом взимку, 06:20–22:20 влітку) бот сам вирішує, що робити:
 # перевіряє сайт коледжу, розбирає нові PDF, оновлює сайт і розсилає ранок/вечір/заміни.
+# GitHub не гарантує час запуску за cron: запуски можуть запізнюватися на години або пропускатися.
+# Тому ранкова/вечірня розсилка надсилається в будь-якому запуску в межах вікна (до 13:00 / 23:00),
+# дублі відсікає стан у воркері, а про зниклі запуски пише cron самого воркера (див. README).
 on:
   schedule:
     - cron: "20 3-19 * * *"
@@ -12,6 +15,10 @@ on:
         type: choice
         options: [auto, morning, evening, weekly, none]
         default: auto
+      test_chat:
+        description: "Для morning/evening/weekly: chat id тестового чату (тоді примусова розсилка піде ЛИШЕ туди)"
+        type: string
+        default: ""
   push:
     branches: [main]
     paths:
@@ -33,10 +40,18 @@ concurrency:
 jobs:
   update:
     runs-on: ubuntu-latest
-    outputs:
-      deploy: ${{ steps.bot.outputs.deploy }}
+    timeout-minutes: 25
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    env:
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
     steps:
+      # саме гілку, а не коміт події: запізнілий чи перезапущений run має бачити свіжі data/ (інакше — дублі розсилок)
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}
 
       - uses: actions/setup-python@v5
         with:
@@ -47,11 +62,8 @@ jobs:
       - name: Встановити залежності
         run: pip install -r scripts/requirements.txt
 
-      - name: Оновити розклад, сайт і розіслати
-        id: bot
+      - name: Режим
         env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           EVENT: ${{ github.event_name }}
           INPUT_MODE: ${{ inputs.mode }}
           OWNER: ${{ github.repository_owner }}
@@ -62,11 +74,38 @@ jobs:
             schedule) MODE=auto ;;
             *) MODE="${INPUT_MODE:-auto}" ;;
           esac
-          export SITE_URL="https://${OWNER,,}.github.io/${REPO_NAME}/"
-          echo "Режим: $MODE · сайт: $SITE_URL"
-          python scripts/bot.py run --mode "$MODE"
+          echo "MODE=$MODE" >> "$GITHUB_ENV"
+          echo "ROZKLAD_STATE=$RUNNER_TEMP/rozklad-state.json" >> "$GITHUB_ENV"
+          echo "SITE_URL=https://${OWNER,,}.github.io/${REPO_NAME}/" >> "$GITHUB_ENV"
+          echo "Режим: $MODE · запуск: $EVENT · $(TZ=Europe/Kyiv date +'%d.%m %H:%M') за Києвом"
 
-      - name: Зберегти розібрані PDF (data/)
+      - name: Отримати PDF і зібрати сайт
+        id: bot
+        run: python scripts/bot.py update --mode "$MODE"
+
+      - uses: actions/configure-pages@v5
+        if: steps.bot.outputs.deploy == 'true'
+
+      - uses: actions/upload-pages-artifact@v3
+        if: steps.bot.outputs.deploy == 'true'
+        with:
+          path: docs
+
+      - name: Опублікувати сайт
+        id: deploy
+        if: steps.bot.outputs.deploy == 'true'
+        uses: actions/deploy-pages@v4
+
+      # після деплою: нові дані вже на сайті, тож кнопки бота (воркер читає Pages) показують те саме, що й розсилка
+      - name: Розсилки й сповіщення адміну
+        id: notify
+        if: always() && steps.bot.outcome == 'success'
+        env:
+          TEST_CHAT: ${{ inputs.test_chat }}
+          PAGES_DEPLOYED: ${{ steps.deploy.outcome }}
+        run: python scripts/bot.py notify --mode "$MODE" --only "$TEST_CHAT"
+
+      - name: Зберегти розібрані PDF і стан збоїв (data/)
         if: always() && steps.bot.outcome != 'skipped'
         run: |
           [ -d data ] || { echo "Немає data/"; exit 0; }
@@ -81,14 +120,6 @@ jobs:
           done
           exit 1
 
-      - uses: actions/configure-pages@v5
-        if: steps.bot.outputs.deploy == 'true'
-
-      - uses: actions/upload-pages-artifact@v3
-        if: steps.bot.outputs.deploy == 'true'
-        with:
-          path: docs
-
       # GitHub вимикає cron-workflow після 60 днів без комітів — вмикаємо його знову щоразу
       - name: Не дати GitHub вимкнути розклад
         if: always() && github.event_name == 'schedule'
@@ -98,13 +129,15 @@ jobs:
           REPO: ${{ github.repository }}
         run: gh api -X PUT "repos/$REPO/actions/workflows/rozklad.yml/enable"
 
-  pages:
-    needs: update
-    if: needs.update.outputs.deploy == 'true'
-    runs-on: ubuntu-latest
-    environment:
-      name: github-pages
-      url: ${{ steps.deploy.outputs.page_url }}
-    steps:
-      - id: deploy
-        uses: actions/deploy-pages@v4
+      # збій отримання/розбору не маскується під успіх: сайт і розсилки працюють на останніх даних,
+      # але сам запуск позначається як невдалий, з причиною в анотації й підсумку
+      - name: Підсумок перевірки
+        if: always() && steps.bot.outcome == 'success'
+        env:
+          DEGRADED: ${{ steps.notify.outputs.degraded || steps.bot.outputs.degraded }}
+        run: |
+          if [ "$DEGRADED" = "true" ]; then
+            echo "::error::Перевірка зі збоями (сайт коледжу / PDF / розбір / воркер) — деталі вище й у Summary. Показано останній робочий розклад."
+            exit 1
+          fi
+          echo "Усе гаразд"

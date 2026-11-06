@@ -12,6 +12,12 @@
     }
   ],
   "vars": {
-    "SITE_URL": "https://yaroslav28077.github.io/pfk-rozklad/"
+    "SITE_URL": "https://yaroslav28077.github.io/pfk-rozklad/",
+    "WATCHDOG_HOURS": "4"
+  },
+  "triggers": {
+    "crons": [
+      "15 * * * *"
+    ]
   }
 }

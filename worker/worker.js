@@ -2,6 +2,8 @@
 // Розгортає Cloudflare Workers Builds при кожному пуші в main; прив'язки — у wrangler.json (KV створюється сам):
 //   BOT_TOKEN (secret, задається в Cloudflare: Settings → Variables and Secrets) — токен бота; SITE_URL (var) — адреса сайту на GitHub Pages; USERS (KV) — підписники.
 // Підписник = ключ "u:<chat id>" у KV, у metadata: { g: "СОБ-11", m: 1 (ранок), e: 1 (вечір), c: 1 (заміни) }.
+// Інші ключі KV: "s:<розсилка>" — стан розсилок (bot.py), "hb" — останній запуск Actions, "wd" — тривога watchdog.
+// Опційно: GH_DISPATCH_TOKEN (secret) — воркер сам запускає workflow, якщо GitHub пропускає cron; WATCHDOG_HOURS (var).
 
 const DAYS = ["Неділя", "Понеділок", "Вівторок", "Середа", "Четвер", "П'ятниця", "Субота"];
 const SHORT = ["Нд", "Пн", "Вт", "Ср", "Чт", "Пт", "Сб"];
@@ -41,6 +43,8 @@ async function getJSON(env, path) {
   if (!r.ok) throw new Error(path + ": " + r.status);
   return r.json();
 }
+// дані групи з версією з index.json: щойно index оновився, воркер бере новий файл групи, а не закешований старий
+const groupJSON = (env, index, slug) => getJSON(env, `data/g/${slug}.json?v=${encodeURIComponent(index.hash || "")}`);
 const allGroups = (index) => Object.entries(index.courses).flatMap(([c, gs]) => gs.map((g) => ({ ...g, course: +c })));
 const findGroup = (index, name) => allGroups(index).find((g) => norm(g.name) === norm(name) || g.slug === String(name || "").toLowerCase());
 
@@ -222,7 +226,7 @@ const setMenuButton = (env, chatId, g) => tg(env, "setChatMenuButton", { chat_id
 
 async function showSettings(env, chatId, index, user, msg) {
   const g = findGroup(index, user.g);
-  const data = g ? await getJSON(env, `data/g/${g.slug}.json`).catch(() => null) : null;
+  const data = g ? await groupJSON(env, index, g.slug).catch(() => null) : null;
   const text = settingsText(user, data), kb = settingsKb(user, data);
   return msg ? edit(env, msg, text, kb) : send(env, chatId, text, kb);
 }
@@ -237,7 +241,7 @@ async function chooseGroup(env, chatId, index, user, slugOrName, msg) {
   const text = `✅ Твоя група: <b>${esc(g.name)}</b> (${g.course} курс)\n\nТепер я надсилатиму її розклад сам. Кнопки внизу — щоб подивитися будь-коли.`;
   if (msg) await edit(env, msg, text); else await send(env, chatId, text, MENU);
   if (msg) await send(env, chatId, "Меню 👇", MENU);
-  const data = await getJSON(env, `data/g/${g.slug}.json`);
+  const data = await groupJSON(env, index, g.slug);
   const [t, kb] = view(env, data, "today", u.sg);
   await send(env, chatId, t, kb);
   return true;
@@ -254,7 +258,7 @@ async function onUpdate(env, upd) {
   const chatId = cb ? cb.message.chat.id : msg?.chat.id;
   if (!chatId || (!cb && !msg.text)) return;
   const [index, user] = await Promise.all([getJSON(env, "data/index.json"), getUser(env, chatId)]);
-  const groupData = async (u) => { const g = u && findGroup(index, u.g); return g ? getJSON(env, `data/g/${g.slug}.json`) : null; };
+  const groupData = async (u) => { const g = u && findGroup(index, u.g); return g ? groupJSON(env, index, g.slug) : null; };
 
   if (cb) {
     const d = cb.data || "";
@@ -332,10 +336,78 @@ async function api(env, path, request) {
     await Promise.all((body.ids || []).map((id) => env.USERS.delete("u:" + id)));
     return { ok: true };
   }
+  // стан розсилок: bot.py читає ДО відправки і записує ПІСЛЯ (хто отримав / кому повторити)
+  if (path === "/api/state/get") {
+    const keys = (body.keys || []).slice(0, 50);
+    const vals = await Promise.all(keys.map((k) => env.USERS.get("s:" + k, "json")));
+    return { values: Object.fromEntries(keys.map((k, i) => [k, vals[i]])) };
+  }
+  if (path === "/api/state/set") {
+    const ttl = Math.max(60, Math.min(+body.ttl || 3 * 86400, 30 * 86400));
+    await env.USERS.put("s:" + body.key, JSON.stringify(body.value ?? {}), { expirationTtl: ttl });
+    return { ok: true };
+  }
+  // група стала супергрупою (новий chat id) — переносимо підписку з усіма налаштуваннями
+  if (path === "/api/move") {
+    const u = await getUser(env, body.from);
+    if (u && !(await getUser(env, body.to))) await saveUser(env, body.to, u);
+    if (u) await env.USERS.delete("u:" + body.from);
+    return { ok: true, moved: !!u };
+  }
+  // «запуск GitHub Actions відбувся» — для зовнішнього контролю в scheduled()
+  if (path === "/api/heartbeat") {
+    await env.USERS.put("hb", JSON.stringify({ ts: Date.now(), admins: body.admins || [], degraded: !!body.degraded, run: body.run || "", repo: body.repo || "" }));
+    return { ok: true };
+  }
   return null;
 }
 
+// ---------------------------------------------------------------- зовнішній контроль запусків (Cron Trigger воркера)
+// GitHub Actions не може сам повідомити, що його не запустили. Тому раз на годину воркер дивиться на останній
+// heartbeat від bot.py: якщо запусків немає довше за WATCHDOG_HOURS (типово 4) — пише адміну один раз
+// (нагадування не частіше ніж раз на 12 год), а коли запуски відновляться — повідомляє про відновлення.
+// Якщо задано секрет GH_DISPATCH_TOKEN (fine-grained token: Actions → Read and write лише для цього репозиторію),
+// воркер ще й сам запускає workflow, коли GitHub пропускає щогодинний cron.
+const kyivHour = (d = new Date()) => +new Intl.DateTimeFormat("en-GB", { timeZone: "Europe/Kyiv", hour: "2-digit", hourCycle: "h23" }).format(d);
+const kyivTime = (ms) => new Intl.DateTimeFormat("uk-UA", { timeZone: "Europe/Kyiv", day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" }).format(new Date(ms));
+
+async function scheduled(env, nowMs = Date.now()) {
+  const hb = await env.USERS.get("hb", "json");
+  if (!hb) return { skipped: "no heartbeat yet" };
+  const ageH = (nowMs - hb.ts) / 3600e3;
+  const h = kyivHour(new Date(nowMs));
+  const res = { ageH: Math.round(ageH * 10) / 10 };
+  const repo = hb.repo || env.GITHUB_REPO || "";
+  if (env.GH_DISPATCH_TOKEN && repo && h >= 6 && h <= 22 && ageH >= 0.75) {
+    const r = await fetch(`https://api.github.com/repos/${repo}/actions/workflows/rozklad.yml/dispatches`, {
+      method: "POST",
+      headers: { Authorization: "Bearer " + env.GH_DISPATCH_TOKEN, Accept: "application/vnd.github+json", "User-Agent": "pfk-rozklad-worker", "content-type": "application/json" },
+      body: JSON.stringify({ ref: "main", inputs: { mode: "auto" } }),
+    });
+    res.dispatched = r.status;
+  }
+  const limit = +env.WATCHDOG_HOURS || 4;
+  const wd = await env.USERS.get("wd", "json");
+  const tell = (text) => Promise.all((hb.admins || []).map((c) => send(env, c, text)));
+  const actions = repo ? `https://github.com/${repo}/actions` : "";
+  if (ageH > limit && h >= 9 && h <= 22) {
+    if (!wd || nowMs - wd.alerted > 12 * 3600e3) {
+      await tell(`⏰ <b>Розклад ПФК: GitHub Actions не запускався вже ~${Math.round(ageH)} год</b>\nОстанній запуск: ${kyivTime(hb.ts)}.\nРозклад не оновлюється, ранкові/вечірні розсилки можуть не прийти.${actions ? "\n" + actions : ""}`);
+      await env.USERS.put("wd", JSON.stringify({ alerted: nowMs, since: wd?.since || hb.ts }));
+      res.alerted = true;
+    }
+  } else if (wd && ageH <= limit) {
+    await tell(`✅ <b>Розклад ПФК: запуски GitHub Actions відновилися</b> (перерва з ${kyivTime(wd.since)}).`);
+    await env.USERS.delete("wd");
+    res.recovered = true;
+  }
+  return res;
+}
+
 export default {
+  async scheduled(event, env, ctx) {
+    ctx.waitUntil(scheduled(env, event.scheduledTime).then((r) => console.log("watchdog", JSON.stringify(r))));
+  },
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
     const secret = await secretOf(env.BOT_TOKEN);
