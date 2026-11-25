@@ -110,3 +110,31 @@ test("дані групи беруться з версією index.hash (без 
   await done;
   assert.ok(calls.some((c) => c.url === SITE + "data/g/sob-11.json?v=abc123"), calls.map((c) => c.url).join("\n"));
 });
+
+test("свіжіший знімок у KV перекриває застарілий GitHub Pages і віддається на /data/*", async () => {
+  const env = mkEnv();
+  const today = new Intl.DateTimeFormat("en-CA", { timeZone: "Europe/Kyiv", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
+  const kvBundle = {
+    hash: "fresh99",
+    updated: "2099-01-01T12:00:00+02:00",
+    index: { hash: "fresh99", updated: "2099-01-01T12:00:00+02:00", courses: { 1: [{ name: "СОБ-11", slug: "sob-11", room: "101" }] } },
+    groups: { "sob-11": { group: "СОБ-11", course: 1, slug: "sob-11", days: { [today]: { items: [{ pair: 1, start: "08:00", end: "09:20", subject: "Свіжа пара з KV" }] } }, changes: [] } },
+  };
+  await api(env, "/api/state/set", { key: "site:bundle", value: kvBundle, ttl: 86400 });
+  await env.USERS.put("u:42", "", { metadata: { g: "СОБ-11", m: 1, e: 1, c: 1, w: 1, s: 0, sg: 0, mh: 6, eh: 18 } });
+  calls = [];
+  let done;
+  await worker.fetch(new Request("https://w.test/", { method: "POST", headers: { "X-Telegram-Bot-Api-Secret-Token": SECRET },
+    body: JSON.stringify({ message: { chat: { id: 42, type: "private" }, text: "/today" } }) }), env, { waitUntil: (p) => (done = p) });
+  await done;
+  assert.match(tgSends()[0].body.text, /Свіжа пара з KV/);
+
+  const idxRes = await worker.fetch(new Request("https://w.test/data/index.json"), env, { waitUntil() {} });
+  assert.equal(idxRes.status, 200);
+  assert.equal(idxRes.headers.get("Access-Control-Allow-Origin"), "*");
+  assert.equal((await idxRes.json()).hash, "fresh99");
+
+  const grpRes = await worker.fetch(new Request("https://w.test/data/g/sob-11.json"), env, { waitUntil() {} });
+  assert.equal(grpRes.status, 200);
+  assert.equal((await grpRes.json()).days[today].items[0].subject, "Свіжа пара з KV");
+});

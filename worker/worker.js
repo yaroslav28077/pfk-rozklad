@@ -36,15 +36,28 @@ async function secretOf(token) {
   return [...new Uint8Array(h)].map((b) => b.toString(16).padStart(2, "0")).join("").slice(0, 48);
 }
 
-// ---------------------------------------------------------------- дані з GitHub Pages
+// ---------------------------------------------------------------- дані з GitHub Pages або KV воркера
 async function getJSON(env, path) {
   const base = env.SITE_URL.endsWith("/") ? env.SITE_URL : env.SITE_URL + "/";
   const r = await fetch(base + path, { cf: { cacheTtl: 120, cacheEverything: true } });
   if (!r.ok) throw new Error(path + ": " + r.status);
   return r.json();
 }
-// дані групи з версією з index.json: щойно index оновився, воркер бере новий файл групи, а не закешований старий
-const groupJSON = (env, index, slug) => getJSON(env, `data/g/${slug}.json?v=${encodeURIComponent(index.hash || "")}`);
+const tsOf = (x) => { const t = Date.parse(x?.updated || ""); return Number.isFinite(t) ? t : 0; };
+async function loadSite(env) {
+  const [pagesIndex, bundle] = await Promise.all([
+    getJSON(env, "data/index.json").catch(() => null),
+    env.USERS.get("s:site:bundle", "json").catch(() => null),
+  ]);
+  if (bundle?.index && (!pagesIndex || tsOf(bundle.index) > tsOf(pagesIndex))) {
+    return { index: bundle.index, groups: bundle.groups || null };
+  }
+  if (pagesIndex) return { index: pagesIndex, groups: null };
+  throw new Error("data/index.json unavailable");
+}
+// дані групи з версією з index.json або зі свіжого KV-знімка
+const groupJSON = (env, site, slug) =>
+  site.groups?.[slug] ? Promise.resolve(site.groups[slug]) : getJSON(env, `data/g/${slug}.json?v=${encodeURIComponent(site.index.hash || "")}`);
 const allGroups = (index) => Object.entries(index.courses).flatMap(([c, gs]) => gs.map((g) => ({ ...g, course: +c })));
 const findGroup = (index, name) => allGroups(index).find((g) => norm(g.name) === norm(name) || g.slug === String(name || "").toLowerCase());
 
@@ -224,15 +237,15 @@ function view(env, g, key, sg = 0) {
 // кнопка «Меню» біля поля вводу відкриває сайт розкладу своєї групи прямо в Telegram (Mini App)
 const setMenuButton = (env, chatId, g) => tg(env, "setChatMenuButton", { chat_id: chatId, menu_button: { type: "web_app", text: "Розклад", web_app: { url: siteLink(env, { group: g.name }) } } });
 
-async function showSettings(env, chatId, index, user, msg) {
-  const g = findGroup(index, user.g);
-  const data = g ? await groupJSON(env, index, g.slug).catch(() => null) : null;
+async function showSettings(env, chatId, site, user, msg) {
+  const g = findGroup(site.index, user.g);
+  const data = g ? await groupJSON(env, site, g.slug).catch(() => null) : null;
   const text = settingsText(user, data), kb = settingsKb(user, data);
   return msg ? edit(env, msg, text, kb) : send(env, chatId, text, kb);
 }
 
-async function chooseGroup(env, chatId, index, user, slugOrName, msg) {
-  const g = findGroup(index, slugOrName);
+async function chooseGroup(env, chatId, site, user, slugOrName, msg) {
+  const g = findGroup(site.index, slugOrName);
   if (!g) return false;
   const u = { ...DEFAULTS, ...(user || {}), g: g.name };
   if (user && user.g !== g.name) u.sg = 0; // нова група — підгрупа скидається
@@ -241,7 +254,7 @@ async function chooseGroup(env, chatId, index, user, slugOrName, msg) {
   const text = `✅ Твоя група: <b>${esc(g.name)}</b> (${g.course} курс)\n\nТепер я надсилатиму її розклад сам. Кнопки внизу — щоб подивитися будь-коли.`;
   if (msg) await edit(env, msg, text); else await send(env, chatId, text, MENU);
   if (msg) await send(env, chatId, "Меню 👇", MENU);
-  const data = await groupJSON(env, index, g.slug);
+  const data = await groupJSON(env, site, g.slug);
   const [t, kb] = view(env, data, "today", u.sg);
   await send(env, chatId, t, kb);
   return true;
@@ -257,15 +270,16 @@ async function onUpdate(env, upd) {
   const msg = upd.message;
   const chatId = cb ? cb.message.chat.id : msg?.chat.id;
   if (!chatId || (!cb && !msg.text)) return;
-  const [index, user] = await Promise.all([getJSON(env, "data/index.json"), getUser(env, chatId)]);
-  const groupData = async (u) => { const g = u && findGroup(index, u.g); return g ? groupJSON(env, index, g.slug) : null; };
+  const [site, user] = await Promise.all([loadSite(env), getUser(env, chatId)]);
+  const index = site.index;
+  const groupData = async (u) => { const g = u && findGroup(index, u.g); return g ? groupJSON(env, site, g.slug) : null; };
 
   if (cb) {
     const d = cb.data || "";
     tg(env, "answerCallbackQuery", { callback_query_id: cb.id });
     if (d === "courses") return edit(env, cb.message, "Обери свій курс 👇", coursesKb(index));
     if (d.startsWith("c:")) return edit(env, cb.message, `${d.slice(2)} курс — обери групу 👇`, groupsKb(index, d.slice(2)));
-    if (d.startsWith("g:")) return chooseGroup(env, chatId, index, user, d.slice(2), cb.message);
+    if (d.startsWith("g:")) return chooseGroup(env, chatId, site, user, d.slice(2), cb.message);
     if (d === "help") return edit(env, cb.message, helpText(user, chatId), { inline_keyboard: [[{ text: "⚙️ Налаштування", callback_data: "settings" }]] });
     if (d === "stop?") return edit(env, cb.message, "Точно відписатися? Я перестану надсилати розклад.", stopKb);
     if (d === "stop") { await env.USERS.delete("u:" + chatId); return edit(env, cb.message, "Готово, я більше не писатиму. Повернутися — /start"); }
@@ -276,7 +290,7 @@ async function onUpdate(env, upd) {
       else if (d === "s:sg") user.sg = (user.sg + 1) % 3;
       else if (d.startsWith("s:")) { const k = d.slice(2); if (["m", "e", "c", "w", "s"].includes(k)) user[k] = user[k] ? 0 : 1; }
       if (d !== "settings") await saveUser(env, chatId, user);
-      return showSettings(env, chatId, index, user, cb.message);
+      return showSettings(env, chatId, site, user, cb.message);
     }
     const g = await groupData(user);
     if (!g) return edit(env, cb.message, "Спершу обери групу 👇", coursesKb(index));
@@ -289,7 +303,7 @@ async function onUpdate(env, upd) {
   const key = keyFromText(text);
   if (key === "start") {
     const payload = text.split(/\s+/)[1]; // t.me/<бот>?start=sob-11 — одразу обрати групу
-    if (payload && (await chooseGroup(env, chatId, index, user, payload))) return;
+    if (payload && (await chooseGroup(env, chatId, site, user, payload))) return;
     if (!user) return send(env, chatId, "Привіт! Я бот розкладу ПФК НЮУ 👋\nОбери свій курс 👇", coursesKb(index));
     await send(env, chatId, helpText(user, chatId), MENU);
     return;
@@ -297,7 +311,7 @@ async function onUpdate(env, upd) {
   if (key === "help") return send(env, chatId, helpText(user, chatId), MENU);
   if (key === "group") return send(env, chatId, "Обери свій курс 👇", coursesKb(index));
   if (key === "stop") { await env.USERS.delete("u:" + chatId); return send(env, chatId, "Готово, я більше не писатиму. Повернутися — /start", { remove_keyboard: true }); }
-  if (key === "settings") return user ? showSettings(env, chatId, index, user) : send(env, chatId, "Спершу обери групу 👇", coursesKb(index));
+  if (key === "settings") return user ? showSettings(env, chatId, site, user) : send(env, chatId, "Спершу обери групу 👇", coursesKb(index));
   if (key) {
     const g = await groupData(user);
     if (!g) return send(env, chatId, "Спершу обери групу 👇", coursesKb(index));
@@ -305,7 +319,7 @@ async function onUpdate(env, upd) {
     return send(env, chatId, t, kb);
   }
   // просто написали назву групи, напр. «соб-11»
-  if (findGroup(index, text)) return chooseGroup(env, chatId, index, user, text);
+  if (findGroup(index, text)) return chooseGroup(env, chatId, site, user, text);
   if (msg.chat.type === "private") return send(env, chatId, "Не зрозумів 🤔 Натисни кнопку внизу або напиши назву групи (напр. СОБ-11).", MENU);
 }
 
@@ -415,6 +429,20 @@ export default {
       if (request.headers.get("Authorization") !== "Bearer " + secret) return new Response("forbidden", { status: 403 });
       const r = await api(env, url.pathname, request);
       return r ? Response.json(r) : new Response("not found", { status: 404 });
+    }
+    if (request.method === "GET" && url.pathname.startsWith("/data/")) {
+      const cors = { "Access-Control-Allow-Origin": "*", "Cache-Control": "public, max-age=120" };
+      try {
+        const site = await loadSite(env);
+        if (url.pathname === "/data/index.json") return Response.json(site.index, { headers: cors });
+        const m = url.pathname.match(/^\/data\/g\/([a-z0-9-]+)\.json$/);
+        if (m) {
+          const g = await groupJSON(env, site, m[1]).catch(() => null);
+          return g ? Response.json(g, { headers: cors }) : new Response("not found", { status: 404, headers: cors });
+        }
+      } catch {
+        return new Response("unavailable", { status: 503, headers: cors });
+      }
     }
     if (request.method !== "POST") return new Response("pfk-rozklad bot OK");
     if (request.headers.get("X-Telegram-Bot-Api-Secret-Token") !== secret) return new Response("forbidden", { status: 403 });

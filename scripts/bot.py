@@ -843,6 +843,24 @@ def ensure_webhook():
     log(f"Вебхук → {WORKER_URL}: {'ok' if r.get('ok') else r.get('description')}")
 
 
+def sync_worker_site(index, out):
+    """Дублює зібраний розклад у KV воркера (1 ключ), щоб бот працював навіть під час збоїв GitHub Pages."""
+    if not index or not out:
+        return
+    w = Worker()
+    if not w.url:
+        return
+    cur = w.get("site:bundle")
+    if cur is MISSING:
+        return
+    if isinstance(cur, dict) and cur.get("hash") == index.get("hash"):
+        return
+    bundle = {"hash": index["hash"], "updated": index["updated"], "index": index,
+              "groups": {g["slug"]: g for g in out.values()}}
+    if w.put("site:bundle", bundle, 30 * 86400):
+        log("Розклад синхронізовано з KV воркера")
+
+
 def setup_bot():
     """Меню команд і опис бота (раз на добу; BotFather вручну не потрібен)."""
     me = (tg("getMe", {}) or {}).get("result") or {}
@@ -915,6 +933,8 @@ def cmd_update(a):
             ensure_webhook()
         bot_name = setup_bot() if TOKEN else ""
         h = write_site(out, pdfs, bot_name, status)
+        if TOKEN:
+            sync_worker_site(jload(DOCS / "data" / "index.json", None), out)
         changed = h != deployed_hash()
     deploy = bool(out) and (changed or a.mode != "auto")
     state = {"events": events, "problems": problems, "unchecked": sorted(unchecked), "hash": h, "deploy": deploy,
