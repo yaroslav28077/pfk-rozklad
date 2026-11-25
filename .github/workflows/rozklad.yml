@@ -47,7 +47,7 @@ jobs:
     outputs:
       deploy: ${{ steps.bot.outputs.deploy }}
       degraded: ${{ steps.bot.outputs.degraded }}
-      bot_ok: ${{ steps.bot.outcome }}
+      bot_ok: ${{ steps.bot.outputs.ok }}
       mode: ${{ steps.mode.outputs.mode }}
       site_url: ${{ steps.mode.outputs.site_url }}
     steps:
@@ -88,14 +88,16 @@ jobs:
 
       - name: Отримати PDF і зібрати сайт
         id: bot
-        run: python scripts/bot.py update --mode "$MODE"
+        run: |
+          python scripts/bot.py update --mode "$MODE"
+          echo "ok=true" >> "$GITHUB_OUTPUT"
 
       - name: Зберегти стан між джобами
         if: steps.bot.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: rozklad-state
-          path: ${{ env.ROZKLAD_STATE }}
+          path: ${{ runner.temp }}/rozklad-state.json
           retention-days: 1
 
       - uses: actions/configure-pages@v5
@@ -138,7 +140,7 @@ jobs:
   notify:
     name: Розсилки й підсумок
     needs: [update, deploy]
-    if: always() && needs.update.outputs.bot_ok == 'success'
+    if: always() && needs.update.outputs.bot_ok == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
@@ -146,7 +148,6 @@ jobs:
       TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
       MODE: ${{ needs.update.outputs.mode }}
       SITE_URL: ${{ needs.update.outputs.site_url }}
-      ROZKLAD_STATE: ${{ runner.temp }}/rozklad-state.json
     steps:
       - uses: actions/checkout@v4
         with:
@@ -173,6 +174,7 @@ jobs:
         env:
           TEST_CHAT: ${{ inputs.test_chat }}
           PAGES_DEPLOYED: ${{ needs.deploy.result }}
+          ROZKLAD_STATE: ${{ runner.temp }}/rozklad-state.json
         run: python scripts/bot.py notify --mode "$MODE" --only "$TEST_CHAT"
 
       - name: Зберегти стан збоїв (data/)
