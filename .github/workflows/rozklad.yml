@@ -84,10 +84,10 @@ jobs:
         id: bot
         run: python scripts/bot.py update --mode "$MODE"
 
-      - uses: actions/configure-pages@v5
+      - uses: actions/configure-pages@v6
         if: steps.bot.outputs.deploy == 'true' && github.ref_name == 'main'
 
-      - uses: actions/upload-pages-artifact@v3
+      - uses: actions/upload-pages-artifact@v5
         if: steps.bot.outputs.deploy == 'true' && github.ref_name == 'main'
         with:
           path: docs
@@ -95,7 +95,7 @@ jobs:
       - name: Опублікувати сайт
         id: deploy
         if: steps.bot.outputs.deploy == 'true' && github.ref_name == 'main'
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5
 
       # після деплою: нові дані вже на сайті, тож кнопки бота (воркер читає Pages) показують те саме, що й розсилка
       - name: Розсилки й сповіщення адміну

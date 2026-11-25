@@ -102,6 +102,7 @@ def parse_schedule(pdf_bytes, title=""):
         raise ValueError("не знайдено період дії розкладу («з … по …»)")
     course = _course(full) or _course(title)
     groups, lessons = {}, []
+    prev_gcols, prev_first_x, last_day = None, None, None
     for page in doc:
         cs = [c for c in cells(page)]
         if not cs:
@@ -111,15 +112,25 @@ def parse_schedule(pdf_bytes, title=""):
         for c in cs:
             if GROUP_RE.fullmatch(c.text.replace(" ", "")):
                 heads.setdefault(c.r0, []).append(c)
-        if not heads:
+        if heads:
+            hrow = max(heads, key=lambda r: len(heads[r]))
+            gcols = sorted(heads[hrow], key=lambda c: c.c0)
+            first_col = gcols[0].c0
+            prev_gcols = gcols
+            prev_first_x = gcols[0].rect.x0
+            is_continuation = False
+            min_data_row = hrow + 2
+            for g in gcols:
+                name = g.text.replace(" ", "")
+                room = next((c.text for c in cs if c.r0 == g.r1 + 1 and c.c0 <= g.c0 <= c.c1 and c.c1 <= g.c1 and ("ауд" in c.text or c.text.strip().isdigit())), "")
+                groups[name] = {"name": name, "course": course, "room": room.replace("ауд.", "").strip()}
+        elif prev_gcols:
+            gcols = prev_gcols
+            first_col = None
+            is_continuation = True
+            min_data_row = 0
+        else:
             continue
-        hrow = max(heads, key=lambda r: len(heads[r]))
-        gcols = sorted(heads[hrow], key=lambda c: c.c0)
-        first_col = gcols[0].c0
-        for g in gcols:
-            name = g.text.replace(" ", "")
-            room = next((c.text for c in cs if c.r0 == g.r1 + 1 and c.c0 <= g.c0 <= c.c1 and c.c1 <= g.c1 and ("ауд" in c.text or c.text.strip().isdigit())), "")
-            groups[name] = {"name": name, "course": course, "room": room.replace("ауд.", "").strip()}
         # дні тижня та пари
         day_rows = []
         for c in cs:
@@ -130,37 +141,67 @@ def parse_schedule(pdf_bytes, title=""):
         day_rows.sort()
         bands = []
         for c in cs:
-            if c.c1 >= first_col:
-                continue
+            if not is_continuation:
+                if c.c1 >= first_col:
+                    continue
+            else:
+                if (c.rect.x0 + c.rect.x1) / 2 >= prev_first_x - 3:
+                    continue
             m = TIME_RE.search(c.text.replace(" ", ""))
             if not m:
                 continue
             num = next((x.text for x in cs if x.c1 < c.c0 and x.r0 <= c.r0 <= x.r1 and x.text.strip().isdigit()), "")
             day = [d for d in day_rows if d[0] < c.r0]
-            if not day:
+            if day:
+                day_info = day[-1][1:]
+            elif last_day is not None:
+                day_info = last_day
+            else:
                 continue
-            bands.append({"r0": c.r0, "r1": c.r1, "day": day[-1][1], "online": day[-1][2],
+            bands.append({"r0": c.r0, "r1": c.r1, "day": day_info[0], "online": day_info[1],
                           "pair": int(num) if num else None,
                           "start": f"{int(m.group(1)):02d}:{m.group(2)}", "end": f"{int(m.group(3)):02d}:{m.group(4)}"})
+        if day_rows:
+            last_day = day_rows[-1][1:]
         for b in bands:  # номер пари, якщо в PDF його немає
             if b["pair"] is None:
                 same = sorted(x["r0"] for x in bands if x["day"] == b["day"])
                 b["pair"] = same.index(b["r0"]) + 1
         for c in cs:
-            if c.c1 < first_col or not c.text.strip() or c.r0 <= hrow + 1:
+            if not c.text.strip() or c.r0 < min_data_row:
                 continue
+            if not is_continuation:
+                if c.c1 < first_col:
+                    continue
+            else:
+                if (c.rect.x0 + c.rect.x1) / 2 < prev_first_x - 3:
+                    continue
             if any(c.r0 == d[0] for d in day_rows):
                 continue
             for b in bands:
                 ov = min(c.r1, b["r1"]) - max(c.r0, b["r0"]) + 1
                 if ov <= 0 or ov < (b["r1"] - b["r0"] + 1) / 2 and ov < (c.r1 - c.r0 + 1) / 2:
                     continue
-                for g in gcols:
-                    if c.c1 < g.c0 or c.c0 > g.c1:
-                        continue
+                if not is_continuation:
+                    matched_groups = [g for g in gcols if not (c.c1 < g.c0 or c.c0 > g.c1)]
+                else:
+                    matched_groups = [
+                        g for g in gcols
+                        if (min(c.rect.x1, g.rect.x1) - max(c.rect.x0, g.rect.x0))
+                        > 0.35 * min(max(1.0, c.rect.width), max(1.0, g.rect.width))
+                    ]
+                for g in matched_groups:
                     sub = None
-                    if g.c1 > g.c0 and not (c.c0 <= g.c0 and c.c1 >= g.c1):
-                        sub = max(c.c0, g.c0) - g.c0 + 1
+                    if not is_continuation:
+                        if g.c1 > g.c0 and not (c.c0 <= g.c0 and c.c1 >= g.c1):
+                            sub = max(c.c0, g.c0) - g.c0 + 1
+                        is_stream = c.c1 > g.c1 or c.c0 < g.c0
+                    else:
+                        if c.rect.width < g.rect.width * 0.72:
+                            cx = (c.rect.x0 + c.rect.x1) / 2
+                            gx = (g.rect.x0 + g.rect.x1) / 2
+                            sub = 1 if cx < gx else 2
+                        is_stream = len(matched_groups) > 1 or c.rect.x0 < g.rect.x0 - 6 or c.rect.x1 > g.rect.x1 + 6
                     for alt in _alternatives(c.text):
                         les = parse_lesson(alt, d0.year)
                         les.update({"group": g.text.replace(" ", ""), "day": b["day"], "pair": b["pair"],
@@ -169,7 +210,7 @@ def parse_schedule(pdf_bytes, title=""):
                             les["subgroup"] = sub
                         if b["online"]:
                             les["online"] = True
-                        if c.c1 > g.c1 or c.c0 < g.c0:
+                        if is_stream:
                             les["stream"] = True  # спільна пара кількох груп (потік)
                         lessons.append(les)
     if not groups:
@@ -268,7 +309,7 @@ def change_targets(group_text, groups):
     if m:
         return [g["name"] for g in groups if g.get("course") == int(m.group(1))]
     res = []
-    for part in re.split(r"[,;/]|\sта\s|\sі\s", gt):
+    for part in re.split(r"[,;/+]|\sта\s|\sі\s", gt):
         p = _norm(part)
         if not p:
             continue
