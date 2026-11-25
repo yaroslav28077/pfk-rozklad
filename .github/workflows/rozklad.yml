@@ -41,13 +41,15 @@ jobs:
   update:
     runs-on: ubuntu-latest
     timeout-minutes: 25
-    # публікація сайту — лише з main; запуск з іншої гілки (тест PR) сайт не чіпає
-    environment:
-      name: ${{ github.ref_name == 'main' && 'github-pages' || '' }}
-      url: ${{ steps.deploy.outputs.page_url }}
     env:
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
       TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+    outputs:
+      deploy: ${{ steps.bot.outputs.deploy }}
+      degraded: ${{ steps.bot.outputs.degraded }}
+      bot_ok: ${{ steps.bot.outcome }}
+      mode: ${{ steps.mode.outputs.mode }}
+      site_url: ${{ steps.mode.outputs.site_url }}
     steps:
       # саме гілку, а не коміт події: запізнілий чи перезапущений run має бачити свіжі data/ (інакше — дублі розсилок)
       - uses: actions/checkout@v4
@@ -64,6 +66,7 @@ jobs:
         run: pip install -r scripts/requirements.txt
 
       - name: Режим
+        id: mode
         env:
           EVENT: ${{ github.event_name }}
           INPUT_MODE: ${{ inputs.mode }}
@@ -75,39 +78,105 @@ jobs:
             schedule) MODE=auto ;;
             *) MODE="${INPUT_MODE:-auto}" ;;
           esac
+          SITE_URL="https://${OWNER,,}.github.io/${REPO_NAME}/"
           echo "MODE=$MODE" >> "$GITHUB_ENV"
           echo "ROZKLAD_STATE=$RUNNER_TEMP/rozklad-state.json" >> "$GITHUB_ENV"
-          echo "SITE_URL=https://${OWNER,,}.github.io/${REPO_NAME}/" >> "$GITHUB_ENV"
+          echo "SITE_URL=$SITE_URL" >> "$GITHUB_ENV"
+          echo "mode=$MODE" >> "$GITHUB_OUTPUT"
+          echo "site_url=$SITE_URL" >> "$GITHUB_OUTPUT"
           echo "Режим: $MODE · запуск: $EVENT · $(TZ=Europe/Kyiv date +'%d.%m %H:%M') за Києвом"
 
       - name: Отримати PDF і зібрати сайт
         id: bot
         run: python scripts/bot.py update --mode "$MODE"
 
-      - uses: actions/configure-pages@v6
+      - name: Зберегти стан між джобами
+        if: steps.bot.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: rozklad-state
+          path: ${{ env.ROZKLAD_STATE }}
+          retention-days: 1
+
+      - uses: actions/configure-pages@v5
         if: steps.bot.outputs.deploy == 'true' && github.ref_name == 'main'
 
-      - uses: actions/upload-pages-artifact@v5
+      - uses: actions/upload-pages-artifact@v4
         if: steps.bot.outputs.deploy == 'true' && github.ref_name == 'main'
         with:
           path: docs
 
+      - name: Зберегти розібрані PDF і стан збоїв (data/)
+        if: always() && steps.bot.outcome != 'skipped'
+        run: |
+          [ -d data ] || { echo "Немає data/"; exit 0; }
+          git config user.name "rozklad-bot"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A data
+          if git diff --cached --quiet; then echo "Без змін"; exit 0; fi
+          git commit -m "auto: оновлення розкладу $(TZ=Europe/Kyiv date +'%d.%m %H:%M')"
+          for i in 1 2 3; do
+            git pull --rebase -X theirs origin "${GITHUB_REF_NAME}" && git push origin "HEAD:${GITHUB_REF_NAME}" && exit 0
+            echo "Повтор $i…"; sleep 5
+          done
+          exit 1
+
+  deploy:
+    name: Опублікувати сайт
+    needs: update
+    if: needs.update.outputs.deploy == 'true' && github.ref_name == 'main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
       - name: Опублікувати сайт
-        id: deploy
-        if: steps.bot.outputs.deploy == 'true' && github.ref_name == 'main'
-        uses: actions/deploy-pages@v5
+        id: deployment
+        uses: actions/deploy-pages@v4
+
+  notify:
+    name: Розсилки й підсумок
+    needs: [update, deploy]
+    if: always() && needs.update.outputs.bot_ok == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      MODE: ${{ needs.update.outputs.mode }}
+      SITE_URL: ${{ needs.update.outputs.site_url }}
+      ROZKLAD_STATE: ${{ runner.temp }}/rozklad-state.json
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: scripts/requirements.txt
+
+      - name: Встановити залежності
+        run: pip install -r scripts/requirements.txt
+
+      - name: Завантажити стан від update
+        uses: actions/download-artifact@v4
+        with:
+          name: rozklad-state
+          path: ${{ runner.temp }}
 
       # після деплою: нові дані вже на сайті, тож кнопки бота (воркер читає Pages) показують те саме, що й розсилка
       - name: Розсилки й сповіщення адміну
         id: notify
-        if: always() && steps.bot.outcome == 'success'
         env:
           TEST_CHAT: ${{ inputs.test_chat }}
-          PAGES_DEPLOYED: ${{ steps.deploy.outcome }}
+          PAGES_DEPLOYED: ${{ needs.deploy.result }}
         run: python scripts/bot.py notify --mode "$MODE" --only "$TEST_CHAT"
 
-      - name: Зберегти розібрані PDF і стан збоїв (data/)
-        if: always() && steps.bot.outcome != 'skipped'
+      - name: Зберегти стан збоїв (data/)
+        if: always()
         run: |
           [ -d data ] || { echo "Немає data/"; exit 0; }
           git config user.name "rozklad-bot"
@@ -133,12 +202,11 @@ jobs:
       # збій отримання/розбору не маскується під успіх: сайт і розсилки працюють на останніх даних,
       # але сам запуск позначається як невдалий, з причиною в анотації й підсумку
       - name: Підсумок перевірки
-        if: always() && steps.bot.outcome == 'success'
-        env:
-          DEGRADED: ${{ steps.notify.outputs.degraded || steps.bot.outputs.degraded }}
+        if: always() && (steps.notify.outputs.degraded == 'true' || needs.update.outputs.degraded == 'true' || needs.deploy.result == 'failure')
         run: |
-          if [ "$DEGRADED" = "true" ]; then
-            echo "::error::Перевірка зі збоями (сайт коледжу / PDF / розбір / воркер) — деталі вище й у Summary. Показано останній робочий розклад."
+          if [ "${{ needs.deploy.result }}" = "failure" ]; then
+            echo "::error::Не вдалося опублікувати сайт GitHub Pages."
             exit 1
           fi
-          echo "Усе гаразд"
+          echo "::error::Перевірка зі збоями (сайт коледжу / PDF / розбір / воркер) — деталі вище й у Summary. Показано останній робочий розклад."
+          exit 1

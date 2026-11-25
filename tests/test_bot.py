@@ -20,9 +20,6 @@ sys.path.insert(0, str(ROOT / "scripts"))
 import bot  # noqa: E402
 
 WORKER = "https://worker.test"
-REAL = {p.stem: json.loads(p.read_text(encoding="utf-8")) for p in (ROOT / "data" / "sources").glob("*.json")}
-C1 = next(k for k, v in REAL.items() if v["data"]["course"] == 1)
-C2 = next(k for k, v in REAL.items() if v["data"]["course"] == 2)
 
 
 def shift(data, days, course=None):
@@ -35,6 +32,37 @@ def shift(data, days, course=None):
     if course:
         d["course"] = course
     return d
+
+
+def _load_real():
+    """Бере по одному тижневому розкладу на кожен курс і нормалізує дати на 2026-11-02..06,
+    щоб тести не ламалися, коли в data/sources/ додаються заміни або новіші тижні."""
+    raw = {p.stem: json.loads(p.read_text(encoding="utf-8"))
+           for p in sorted((ROOT / "data" / "sources").glob("*.json"))}
+    out = {}
+    for course in (1, 2, 3):
+        cands = [(k, v) for k, v in raw.items()
+                 if v.get("kind") == "schedule" and isinstance(v.get("data"), dict)
+                 and v["data"].get("course") == course]
+        k, v = next(((k, v) for k, v in cands if v["data"].get("from") == "2026-11-02"), cands[-1])
+        rec = copy.deepcopy(v)
+        d = rec["data"]
+        d0 = date.fromisoformat(d["from"])
+        mon = d0 - timedelta(days=d0.weekday())
+        delta = (date(2026, 11, 2) - mon).days
+        if delta:
+            d = shift(d, delta)
+        if d["to"] > "2026-11-06":
+            d["to"] = "2026-11-06"
+            d["items"] = [it for it in d["items"] if it["date"] <= "2026-11-06"]
+        rec["data"] = d
+        out[k] = rec
+    return out
+
+
+REAL = _load_real()
+C1 = next(k for k, v in REAL.items() if v["data"]["course"] == 1)
+C2 = next(k for k, v in REAL.items() if v["data"]["course"] == 2)
 
 
 def kyiv(y, m, d, hh, mm=5):
@@ -566,3 +594,8 @@ def test_heartbeat_sent_each_run(w):
     w.clock = kyiv(2026, 11, 3, 15)
     w.run()
     assert w.worker.kv["hb"]["admins"] == ["900"] and w.worker.kv["hb"]["degraded"] is False
+
+
+def test_change_targets_supports_plus_separator():
+    groups = [{"name": "СОБ-21", "course": 2}, {"name": "СОІ-22", "course": 2}, {"name": "СОБ-11", "course": 1}]
+    assert bot.parse.change_targets("СОБ-21 +СОІ- 22", groups) == ["СОБ-21", "СОІ-22"]
