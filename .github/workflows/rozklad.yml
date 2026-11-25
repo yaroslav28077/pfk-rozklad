@@ -11,12 +11,16 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: "auto — як за розкладом; morning/evening/weekly — примусова розсилка; none — лише оновити сайт"
+        description: "auto — як за розкладом; morning/evening/weekly/announce — примусова розсилка; none — лише оновити сайт"
         type: choice
-        options: [auto, morning, evening, weekly, none]
+        options: [auto, morning, evening, weekly, announce, none]
         default: auto
       test_chat:
-        description: "Для morning/evening/weekly: chat id тестового чату (тоді примусова розсилка піде ЛИШЕ туди)"
+        description: "Для morning/evening/weekly/announce: chat id тестового чату (тоді примусова розсилка піде ЛИШЕ туди)"
+        type: string
+        default: ""
+      message:
+        description: "Текст для announce (порожньо — стандартне повідомлення про відновлення бота)"
         type: string
         default: ""
   push:
@@ -173,9 +177,10 @@ jobs:
         id: notify
         env:
           TEST_CHAT: ${{ inputs.test_chat }}
+          ANNOUNCE_MESSAGE: ${{ inputs.message }}
           PAGES_DEPLOYED: ${{ needs.deploy.result }}
           ROZKLAD_STATE: ${{ runner.temp }}/rozklad-state.json
-        run: python scripts/bot.py notify --mode "$MODE" --only "$TEST_CHAT"
+        run: python scripts/bot.py notify --mode "$MODE" --only "$TEST_CHAT" --message "$ANNOUNCE_MESSAGE"
 
       - name: Зберегти стан збоїв (data/)
         if: always()

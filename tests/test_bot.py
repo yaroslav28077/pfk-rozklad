@@ -193,8 +193,8 @@ class World:
         return [t for c, t, _ in self.sent if c == str(cid)]
 
     # --- запуск як у GitHub Actions ---
-    def run(self, mode="auto", only=""):
-        a = Namespace(mode=mode, only=only, strict=False, state=str(self.tmp / "state.json"))
+    def run(self, mode="auto", only="", message=""):
+        a = Namespace(mode=mode, only=only, message=message, strict=False, state=str(self.tmp / "state.json"))
         st = bot.cmd_update(a)
         problems = bot.cmd_notify(a)
         return st, problems
@@ -599,3 +599,15 @@ def test_heartbeat_sent_each_run(w):
 def test_change_targets_supports_plus_separator():
     groups = [{"name": "СОБ-21", "course": 2}, {"name": "СОІ-22", "course": 2}, {"name": "СОБ-11", "course": 1}]
     assert bot.parse.change_targets("СОБ-21 +СОІ- 22", groups) == ["СОБ-21", "СОІ-22"]
+
+
+def test_announce_mode_sends_default_and_custom_message(w):
+    w.seed_real()
+    w.worker.users = {"a": user("a", "СОБ-11"), "b": user("b", "ПД-21")}
+    w.clock = kyiv(2026, 11, 3, 15)
+    w.run(mode="announce")
+    assert len(w.to("a")) == 1 and "Бот розкладу ПФК НЮУ відновлено" in w.to("a")[0]
+    assert len(w.to("b")) == 1 and "Бот розкладу ПФК НЮУ відновлено" in w.to("b")[0]
+    w.run(mode="announce", only="777", message="Перевірка")
+    assert len(w.to("777")) == 1 and w.to("777")[0] == "Перевірка"
+    assert len(w.to("a")) == 1 and len(w.to("b")) == 1

@@ -648,7 +648,15 @@ class Delivery:
                 self.problems.append(key)
 
 
-def notify(out, events, mode, only=None, stale_since=None):
+DEFAULT_ANNOUNCE = (
+    "✅ <b>Бот розкладу ПФК НЮУ відновлено!</b>\n\n"
+    "Бот знову працює у штатному режимі: розклади усіх курсів та заміни "
+    "автоматично оновлюються з офіційного порталу nlu.edu.ua.\n\n"
+    "Натисни «📅 Сьогодні» або «🗓 Тиждень», щоб перевірити актуальні пари."
+)
+
+
+def notify(out, events, mode, only=None, stale_since=None, message=""):
     """Розсилки. Повертає список технічних проблем (для звіту адміну)."""
     problems = []
     if not TOKEN:
@@ -720,6 +728,9 @@ def notify(out, events, mode, only=None, stale_since=None):
     if mode == "weekly":
         mon = t - timedelta(days=t.weekday()) if t.weekday() < 5 else next_mon
         D.run(f"weekly:{t}:force", test_users if only else users, lambda u: G(u) and fmt_week(G(u), mon, sg(u)) + note, kb, force=True)
+    if mode == "announce":
+        msg_text = (message or "").strip() or DEFAULT_ANNOUNCE
+        D.run(f"announce:{t}:force", test_users if only else users, lambda u, m=msg_text: m, kb, force=True)
     for e in events:
         if e["type"] == "changes":
             targets = [(z, set(parse.change_targets(z["group"], glist))) for z in e["rows"]]
@@ -955,8 +966,9 @@ def cmd_notify(a, state=None):
     if state.get("events") and state.get("deploy") and os.environ.get("PAGES_DEPLOYED") == "success" and state.get("hash"):
         wait_deployed(state["hash"])
     only = [c.strip() for c in (a.only or "").split(",") if c.strip()]
+    msg = getattr(a, "message", "") or os.environ.get("ANNOUNCE_MESSAGE", "")
     problems = list(state.get("problems") or [])
-    problems += notify(out, state.get("events") or [], a.mode, only=only, stale_since=state.get("stale_since"))
+    problems += notify(out, state.get("events") or [], a.mode, only=only, stale_since=state.get("stale_since"), message=msg)
     report(problems, state.get("unchecked") or [])
     heartbeat(problems)
     gh_output(degraded="true" if problems else "false")
@@ -1004,12 +1016,13 @@ def main():
         sys.stdout.reconfigure(encoding="utf-8"); sys.stderr.reconfigure(encoding="utf-8")
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
-    modes = ["auto", "morning", "evening", "weekly", "none"]
+    modes = ["auto", "morning", "evening", "weekly", "announce", "none"]
     for name in ("run", "update", "notify"):
         r = sub.add_parser(name)
         r.add_argument("--mode", default="auto", choices=modes)
         r.add_argument("--state", help="файл стану між update і notify (типово $ROZKLAD_STATE)")
-        r.add_argument("--only", default="", help="лише для morning/evening/weekly: chat id тестового чату (через кому)")
+        r.add_argument("--only", default="", help="лише для morning/evening/weekly/announce: chat id тестового чату (через кому)")
+        r.add_argument("--message", default="", help="текст для mode=announce")
         r.add_argument("--strict", action="store_true", help="run: код виходу 2, якщо були збої")
     s = sub.add_parser("show"); s.add_argument("group"); s.add_argument("--date")
     a = ap.parse_args()
