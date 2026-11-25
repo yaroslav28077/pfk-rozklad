@@ -180,9 +180,9 @@ def classify(text, href):
     if not name.split("?")[0].endswith(".pdf"):
         return None
     t = f"{text} {name}".lower()
-    if "змін" in t:
+    if "змін" in t or "zmin" in t:
         return "changes"
-    if "розклад" in t and "курс" in t:
+    if ("розклад" in t and "курс" in t) or ("rozklad" in t and "kurs" in t):
         return "schedule"
     return None
 
@@ -858,7 +858,7 @@ def setup_bot():
         {"command": "settings", "description": "Сповіщення"},
         {"command": "help", "description": "Допомога"}]})
     tg("setMyDescription", {"description": f"Розклад усіх груп {CFG.get('short', '')}: пари на сьогодні й завтра, тиждень, заміни. "
-                                           "Натисни «Почати» й обери свою групу. Дані — з plc.nlu.edu.ua."})
+                                           "Натисни «Почати» й обери свою групу. Дані — з nlu.edu.ua."})
     tg("setMyShortDescription", {"short_description": f"Розклад і заміни всіх груп · {CFG.get('short', '')}"})
     if SITE.startswith("https://"):  # кнопка «Розклад» біля поля вводу — сайт як Mini App
         tg("setChatMenuButton", {"menu_button": {"type": "web_app", "text": "Розклад", "web_app": {"url": SITE}}})
