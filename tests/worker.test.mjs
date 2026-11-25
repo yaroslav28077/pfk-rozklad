@@ -138,3 +138,215 @@ test("свіжіший знімок у KV перекриває застаріл�
   assert.equal(grpRes.status, 200);
   assert.equal((await grpRes.json()).days[today].items[0].subject, "Свіжа пара з KV");
 });
+
+test("cron воркера: точний ранок о 06:00 за Києвом, підгрупа, беззвучний режим і захист від дублів", async () => {
+  const env = mkEnv({ NO_DELAY: "1" });
+  const day = "2026-11-03";
+  await api(env, "/api/state/set", {
+    key: "site:bundle",
+    value: {
+      hash: "h1",
+      updated: "2026-11-03T05:00:00+02:00",
+      index: { hash: "h1", courses: { 1: [{ name: "СОБ-11", slug: "sob-11", room: "101" }] } },
+      groups: {
+        "sob-11": {
+          group: "СОБ-11",
+          course: 1,
+          slug: "sob-11",
+          days: {
+            [day]: {
+              items: [
+                { pair: 1, start: "08:00", end: "09:20", subject: "Спільна" },
+                { pair: 2, start: "09:30", end: "10:50", subject: "Лише 1", subgroup: 1 },
+                { pair: 2, start: "09:30", end: "10:50", subject: "Лише 2", subgroup: 2 },
+              ],
+            },
+          },
+          changes: [],
+        },
+      },
+    },
+    ttl: 86400,
+  });
+  await env.USERS.put("u:1", "", { metadata: { g: "СОБ-11", m: 1, e: 1, c: 1, w: 1, s: 1, sg: 2, mh: 6, eh: 18 } });
+  await env.USERS.put("u:2", "", { metadata: { g: "СОБ-11", m: 0, e: 1, c: 1, w: 1, s: 0, sg: 0, mh: 6, eh: 18 } });
+  await env.USERS.put("u:3", "", { metadata: { g: "СОБ-11", m: 1, e: 1, c: 1, w: 1, s: 0, sg: 0, mh: 7, eh: 18 } });
+
+  const run = (iso) => new Promise((res) => worker.scheduled({ scheduledTime: Date.parse(iso) }, env, { waitUntil: (p) => p.then(res) }));
+  calls = [];
+  // 05:55 за Києвом (03:55 UTC взимку) — зарано
+  await run("2026-11-03T03:55:00Z");
+  assert.equal(tgSends().length, 0);
+
+  // 06:00 за Києвом (04:00 UTC) — приходить лише u:1, з KV (0 зовнішніх fetch до SITE_URL)
+  await run("2026-11-03T04:00:00Z");
+  assert.equal(tgSends().length, 1);
+  assert.equal(tgSends()[0].body.chat_id, "1");
+  assert.equal(tgSends()[0].body.disable_notification, true);
+  assert.match(tgSends()[0].body.text, /Спільна/);
+  assert.match(tgSends()[0].body.text, /Лише 2/);
+  assert.doesNotMatch(tgSends()[0].body.text, /Лише 1/);
+  assert.equal(calls.filter((c) => c.url.startsWith(SITE)).length, 0);
+
+  // 06:01 і 06:15 — дублів немає
+  await run("2026-11-03T04:01:00Z");
+  await run("2026-11-03T04:15:00Z");
+  assert.equal(tgSends().length, 1);
+
+  // 07:00 за Києвом — приходить u:3, u:1 дубля не отримує
+  await run("2026-11-03T05:00:00Z");
+  assert.equal(tgSends().length, 2);
+  assert.equal(tgSends()[1].body.chat_id, "3");
+});
+
+test("cron воркера: вечір о 18:00, тиша в суботу та тиждень у неділю", async () => {
+  const env = mkEnv({ NO_DELAY: "1" });
+  await api(env, "/api/state/set", {
+    key: "site:bundle",
+    value: {
+      hash: "h2",
+      updated: "2026-11-06T12:00:00+02:00",
+      index: { hash: "h2", courses: { 1: [{ name: "СОБ-11", slug: "sob-11", room: "" }] } },
+      groups: {
+        "sob-11": {
+          group: "СОБ-11",
+          course: 1,
+          slug: "sob-11",
+          days: {
+            "2026-11-04": { items: [{ pair: 1, start: "08:00", end: "09:20", subject: "Пари середовища" }] },
+            "2026-11-09": { items: [{ pair: 1, start: "08:00", end: "09:20", subject: "Новий тиждень" }] },
+          },
+          changes: [],
+        },
+      },
+    },
+    ttl: 86400,
+  });
+  await env.USERS.put("u:10", "", { metadata: { g: "СОБ-11", m: 1, e: 1, c: 1, w: 1, s: 0, sg: 0, mh: 6, eh: 18 } });
+
+  const run = (iso) => new Promise((res) => worker.scheduled({ scheduledTime: Date.parse(iso) }, env, { waitUntil: (p) => p.then(res) }));
+  calls = [];
+  // Вівторок 03.11 18:00 Київ (16:00 UTC) → пари на 04.11 («Завтра»)
+  await run("2026-11-03T16:00:00Z");
+  assert.equal(tgSends().length, 1);
+  assert.match(tgSends()[0].body.text, /Завтра.*04\.11/);
+
+  // Субота 07.11 18:00 Київ (16:00 UTC) → нічого не шле
+  await run("2026-11-07T16:00:00Z");
+  assert.equal(tgSends().length, 1);
+
+  // Неділя 08.11 18:00 Київ (16:00 UTC) → огляд тижня 09.11–13.11
+  await run("2026-11-08T16:00:00Z");
+  assert.equal(tgSends().length, 2);
+  assert.match(tgSends()[1].body.text, /Тиждень 09\.11–13\.11/);
+});
+
+test("cron воркера: батчинг 80 підписників по 35 за хвилину без перевищення лімітів", async () => {
+  const env = mkEnv({ NO_DELAY: "1" });
+  const day = "2026-11-03";
+  await api(env, "/api/state/set", {
+    key: "site:bundle",
+    value: {
+      hash: "h3",
+      updated: "2026-11-03T05:00:00+02:00",
+      index: { hash: "h3", courses: { 1: [{ name: "СОБ-11", slug: "sob-11", room: "" }] } },
+      groups: { "sob-11": { group: "СОБ-11", course: 1, slug: "sob-11", days: { [day]: { items: [{ pair: 1, start: "08:00", end: "09:20", subject: "Тест" }] } }, changes: [] } },
+    },
+    ttl: 86400,
+  });
+  for (let i = 1; i <= 80; i++) {
+    await env.USERS.put("u:" + i, "", { metadata: { g: "СОБ-11", m: 1, e: 1, c: 1, w: 1, s: 0, sg: 0, mh: 6, eh: 18 } });
+  }
+  const run = (iso) => new Promise((res) => worker.scheduled({ scheduledTime: Date.parse(iso) }, env, { waitUntil: (p) => p.then(res) }));
+  calls = [];
+
+  await run("2026-11-03T04:00:00Z"); // 06:00 → 35
+  assert.equal(tgSends().length, 35);
+  assert.equal((await env.USERS.get("s:morning:2026-11-03:6", "json")).pending.length, 45);
+
+  await run("2026-11-03T04:01:00Z"); // 06:01 → +35 = 70
+  assert.equal(tgSends().length, 70);
+  assert.equal((await env.USERS.get("s:morning:2026-11-03:6", "json")).pending.length, 10);
+
+  await run("2026-11-03T04:02:00Z"); // 06:02 → +10 = 80
+  assert.equal(tgSends().length, 80);
+  const doneState = await env.USERS.get("s:morning:2026-11-03:6", "json");
+  assert.equal(doneState.pending, undefined);
+  assert.equal(doneState.tries, 1);
+
+  await run("2026-11-03T04:03:00Z"); // 06:03 → 0 нових
+  assert.equal(tgSends().length, 80);
+  const uniqueIds = new Set(tgSends().map((s) => String(s.body.chat_id)));
+  assert.equal(uniqueIds.size, 80);
+});
+
+test("cron воркера: обробка 403, migrate_to_chat_id, 502 і 429 без втрати підписників", async () => {
+  const env = mkEnv({ NO_DELAY: "1" });
+  const day = "2026-11-03";
+  await api(env, "/api/state/set", {
+    key: "site:bundle",
+    value: {
+      hash: "h4",
+      updated: "2026-11-03T05:00:00+02:00",
+      index: { hash: "h4", courses: { 1: [{ name: "СОБ-11", slug: "sob-11", room: "" }] } },
+      groups: { "sob-11": { group: "СОБ-11", course: 1, slug: "sob-11", days: { [day]: { items: [{ pair: 1, start: "08:00", end: "09:20", subject: "Тест" }] } }, changes: [] } },
+    },
+    ttl: 86400,
+  });
+  await env.USERS.put("u:drop403", "", { metadata: { g: "СОБ-11", m: 1, mh: 6 } });
+  await env.USERS.put("u:-1", "", { metadata: { g: "СОБ-11", m: 1, mh: 6, sg: 2, s: 1 } });
+  await env.USERS.put("u:flaky", "", { metadata: { g: "СОБ-11", m: 1, mh: 6 } });
+  // 6 користувачів, щоб перевірити 429 на першому мікро-батчі й перенос 6-го у pending
+  await env.USERS.put("u:u4", "", { metadata: { g: "СОБ-11", m: 1, mh: 6 } });
+  await env.USERS.put("u:u5", "", { metadata: { g: "СОБ-11", m: 1, mh: 6 } });
+  await env.USERS.put("u:u6", "", { metadata: { g: "СОБ-11", m: 1, mh: 6 } });
+
+  let failFlaky = true;
+  let trigger429 = true;
+  const origFetch = globalThis.fetch;
+  globalThis.fetch = async (url, opts = {}) => {
+    url = String(url);
+    if (url.endsWith("/sendMessage")) {
+      const body = JSON.parse(opts.body);
+      calls.push({ url, body });
+      if (body.chat_id === "drop403") return Response.json({ ok: false, error_code: 403, description: "Forbidden: bot was blocked by the user" });
+      if (body.chat_id === "-1") return Response.json({ ok: false, error_code: 400, description: "Bad Request: group chat was upgraded to a supergroup chat", parameters: { migrate_to_chat_id: -1001 } });
+      if (body.chat_id === "flaky" && failFlaky) { failFlaky = false; return Response.json({ ok: false, error_code: 502, description: "HTTP 502" }); }
+      if (body.chat_id === "u4" && trigger429) { trigger429 = false; return Response.json({ ok: false, error_code: 429, description: "Too Many Requests" }); }
+      return Response.json({ ok: true });
+    }
+    return origFetch(url, opts);
+  };
+
+  try {
+    const run = (iso) => new Promise((res) => worker.scheduled({ scheduledTime: Date.parse(iso) }, env, { waitUntil: (p) => p.then(res) }));
+    calls = [];
+    await run("2026-11-03T04:00:00Z");
+
+    // 403 видалено, -1 перенесено в -1001 і надіслано, flaky в failed, u4 і u6 (з 2-го мікро-батча) у pending
+    assert.equal(env.USERS.m.has("u:drop403"), false);
+    assert.equal(env.USERS.m.has("u:-1"), false);
+    assert.equal(env.USERS.m.get("u:-1001").metadata.sg, 2);
+    assert.ok(tgSends().some((c) => c.body.chat_id === -1001));
+    const st1 = await env.USERS.get("s:morning:2026-11-03:6", "json");
+    assert.deepEqual(st1.failed, ["flaky"]);
+    assert.ok(st1.pending.includes("u4") && st1.pending.includes("u6"));
+
+    // Наступна хвилина: досилає pending (u4, u6)
+    await run("2026-11-03T04:01:00Z");
+    assert.ok(tgSends().some((c) => c.body.chat_id === "u4"));
+    assert.ok(tgSends().some((c) => c.body.chat_id === "u6"));
+    const st2 = await env.USERS.get("s:morning:2026-11-03:6", "json");
+    assert.equal(st2.pending, undefined);
+    assert.deepEqual(st2.failed, ["flaky"]);
+
+    // Ще хвилина: досилає лише flaky
+    const beforeRetry = tgSends().length;
+    await run("2026-11-03T04:02:00Z");
+    assert.equal(tgSends().length, beforeRetry + 1);
+    assert.equal(tgSends()[beforeRetry].body.chat_id, "flaky");
+    assert.deepEqual((await env.USERS.get("s:morning:2026-11-03:6", "json")).failed, []);
+  } finally {
+    globalThis.fetch = origFetch;
+  }
+});

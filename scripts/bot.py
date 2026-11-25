@@ -635,6 +635,8 @@ class Delivery:
                 self._merge(broadcast(users, make_text, kb))
                 return
             if st:
+                if st.get("pending"):
+                    return
                 left = {str(x) for x in st.get("failed") or []}
                 tries = int(st.get("tries") or 1)
                 if not left or tries >= SEND_TRIES:

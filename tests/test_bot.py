@@ -611,3 +611,12 @@ def test_announce_mode_sends_default_and_custom_message(w):
     w.run(mode="announce", only="777", message="Перевірка")
     assert len(w.to("777")) == 1 and w.to("777")[0] == "Перевірка"
     assert len(w.to("a")) == 1 and len(w.to("b")) == 1
+
+
+def test_bot_skips_slot_while_worker_batch_is_pending(w):
+    w.seed_real()
+    w.worker.users = {"a": user("a", "СОБ-11", mh=6), "b": user("b", "СОБ-11", mh=6)}
+    w.worker.kv["morning:2026-11-03:6"] = {"failed": ["b"], "pending": ["b"], "tries": 0}
+    w.clock = kyiv(2026, 11, 3, 6, 20)
+    w.run()
+    assert w.to("a") == [] and w.to("b") == []

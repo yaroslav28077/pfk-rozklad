@@ -12,7 +12,7 @@ const esc = (s) => String(s ?? "").replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<"
 const dow = (iso) => new Date(iso + "T12:00:00Z").getUTCDay();
 const ddmm = (iso) => iso.slice(8, 10) + "." + iso.slice(5, 7);
 const addDays = (iso, n) => { const d = new Date(iso + "T12:00:00Z"); d.setUTCDate(d.getUTCDate() + n); return d.toISOString().slice(0, 10); };
-const kyivISO = () => new Intl.DateTimeFormat("en-CA", { timeZone: "Europe/Kyiv", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
+const kyivISO = (d = new Date()) => new Intl.DateTimeFormat("en-CA", { timeZone: "Europe/Kyiv", year: "numeric", month: "2-digit", day: "2-digit" }).format(d);
 const mondayOf = (iso) => addDays(iso, dow(iso) === 0 ? -6 : 1 - dow(iso));
 const norm = (s) => String(s || "").toUpperCase().replace(/[\s\-–'’ʼ]/g, "").replace(/I/g, "І").replace(/C/g, "С").replace(/O/g, "О").replace(/P/g, "Р").replace(/K/g, "К").replace(/A/g, "А").replace(/E/g, "Е");
 const plural = (n) => (n % 10 === 1 && n % 100 !== 11 ? "пара" : n % 10 >= 2 && n % 10 <= 4 && !(n % 100 >= 12 && n % 100 <= 14) ? "пари" : "пар");
@@ -20,6 +20,13 @@ const plural = (n) => (n % 10 === 1 && n % 100 !== 11 ? "пара" : n % 10 >= 2
 const DEFAULTS = { m: 1, e: 1, c: 1, w: 1, s: 0, sg: 0, mh: 6, eh: 18 };
 const MORNING_HOURS = [6, 7, 8, 9];
 const EVENING_HOURS = [17, 18, 19, 20, 21];
+const MORNING_UNTIL = 13;
+const EVENING_UNTIL = 23;
+const MAX_SENDS_PER_TICK = 35;
+const SEND_TRIES = 3;
+const MICRO_BATCH = 5;
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const PERM_DROP_RE = /blocked|deactivated|not found|kicked|PEER_ID|chat_id is empty/i;
 const hh = (h) => String(h).padStart(2, "0") + ":00";
 
 const MENU = {
@@ -67,7 +74,17 @@ const groupJSON = (env, site, slug) =>
 const allGroups = (index) => Object.entries(index.courses).flatMap(([c, gs]) => gs.map((g) => ({ ...g, course: +c })));
 const findGroup = (index, name) => allGroups(index).find((g) => norm(g.name) === norm(name) || g.slug === String(name || "").toLowerCase());
 
-// ---------------------------------------------------------------- підписники (KV)
+// підписники (KV)
+async function listUsers(env) {
+  const users = [];
+  let cursor;
+  do {
+    const r = await env.USERS.list({ prefix: "u:", cursor });
+    for (const k of r.keys) if (k.metadata?.g) users.push({ id: k.name.slice(2), ...DEFAULTS, ...k.metadata });
+    cursor = r.list_complete ? null : r.cursor;
+  } while (cursor);
+  return users;
+}
 async function getUser(env, id) {
   const r = await env.USERS.getWithMetadata("u:" + id);
   return r.metadata ? { ...DEFAULTS, ...r.metadata } : null;
@@ -143,27 +160,25 @@ function groupsKb(index, course) {
 }
 const schoolDay = (iso, step) => { let d = addDays(iso, step); while ([0, 6].includes(dow(d))) d = addDays(d, step); return d; };
 // рядок «Пн 02 · Вт 03 …» — швидкий перехід між днями тижня; обраний день підсвічено
-function weekChips(monday, selected) {
-  const today = kyivISO();
+function weekChips(monday, selected, today = kyivISO()) {
   return [0, 1, 2, 3, 4].map((i) => {
     const iso = addDays(monday, i);
     const label = `${SHORT[dow(iso)]} ${iso.slice(8, 10)}${iso === today ? " •" : ""}`;
     return { text: label, callback_data: "d:" + iso, ...(iso === selected ? { style: "primary" } : {}) };
   });
 }
-function dayKb(env, g, iso) {
-  const today = kyivISO();
+function dayKb(env, g, iso, today = kyivISO()) {
   return { inline_keyboard: [
-    weekChips(mondayOf(iso), iso),
+    weekChips(mondayOf(iso), iso, today),
     [{ text: "◀️", callback_data: "d:" + schoolDay(iso, -1) }, { text: iso === today ? "📅 Сьогодні" : "↩️ Сьогодні", callback_data: "d:" + today }, { text: "▶️", callback_data: "d:" + schoolDay(iso, 1) }],
     [{ text: "🗓 Тиждень", callback_data: "w:" + mondayOf(iso) }, { text: "🔄 Заміни", callback_data: "changes" }, { text: "🌐 Сайт", url: siteLink(env, g) }],
   ] };
 }
-function weekKb(env, g, monday) {
+function weekKb(env, g, monday, today = kyivISO()) {
   return { inline_keyboard: [
-    weekChips(monday, null),
+    weekChips(monday, null, today),
     [{ text: "◀️ Попередній", callback_data: "w:" + addDays(monday, -7) }, { text: "Наступний ▶️", callback_data: "w:" + addDays(monday, 7) }],
-    [{ text: "📅 Сьогодні", callback_data: "d:" + kyivISO() }, { text: "🌐 Сайт", url: siteLink(env, g) }],
+    [{ text: "📅 Сьогодні", callback_data: "d:" + today }, { text: "🌐 Сайт", url: siteLink(env, g) }],
   ] };
 }
 const backKb = (env, g) => ({ inline_keyboard: [[{ text: "📅 Сьогодні", callback_data: "d:" + kyivISO() }, { text: "➡️ Завтра", callback_data: "d:" + schoolDay(kyivISO(), 1) }], [{ text: "🌐 Сайт", url: siteLink(env, g) }]] });
@@ -183,7 +198,7 @@ function settingsText(u, g) {
       line(u.c, "🔔", `Одразу — нові заміни й розклад`),
       `${u.s ? "🔕 Беззвучно" : "🔔 Зі звуком"}`,
     ].join("\n"),
-    `<i>Бот запускається щогодини, тож повідомлення може прийти на кілька хвилин пізніше.</i>`,
+    `<i>Розсилка приходить точно в обрану годину за київським часом.</i>`,
   ].join("\n\n");
 }
 function settingsKb(u, g) {
@@ -210,7 +225,8 @@ async function tg(env, method, body) {
   const r = await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/${method}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
   return r.json().catch(() => ({}));
 }
-const send = (env, chat_id, text, reply_markup) => tg(env, "sendMessage", { chat_id, text, parse_mode: "HTML", reply_markup, link_preview_options: { is_disabled: true } });
+const send = (env, chat_id, text, reply_markup, silent = false) =>
+  tg(env, "sendMessage", { chat_id, text, parse_mode: "HTML", reply_markup, ...(silent ? { disable_notification: true } : {}), link_preview_options: { is_disabled: true } });
 const edit = (env, msg, text, reply_markup) => tg(env, "editMessageText", { chat_id: msg.chat.id, message_id: msg.message_id, text, parse_mode: "HTML", reply_markup, link_preview_options: { is_disabled: true } });
 
 function keyFromText(t) {
@@ -331,16 +347,7 @@ async function onUpdate(env, upd) {
 
 // ---------------------------------------------------------------- API для GitHub Actions
 async function api(env, path, request) {
-  if (path === "/api/users") {
-    const users = [];
-    let cursor;
-    do {
-      const r = await env.USERS.list({ prefix: "u:", cursor });
-      for (const k of r.keys) if (k.metadata?.g) users.push({ id: k.name.slice(2), ...DEFAULTS, ...k.metadata });
-      cursor = r.list_complete ? null : r.cursor;
-    } while (cursor);
-    return { users };
-  }
+  if (path === "/api/users") return { users: await listUsers(env) };
   const body = request.method === "POST" ? await request.json() : {};
   if (path === "/api/once") {
     const k = "o:" + body.key;
@@ -382,23 +389,201 @@ async function api(env, path, request) {
   return null;
 }
 
-// ---------------------------------------------------------------- зовнішній контроль запусків (Cron Trigger воркера)
-// GitHub Actions не може сам повідомити, що його не запустили. Тому раз на годину воркер дивиться на останній
-// heartbeat від bot.py: якщо запусків немає довше за WATCHDOG_HOURS (типово 4) — пише адміну один раз
-// (нагадування не частіше ніж раз на 12 год), а коли запуски відновляться — повідомляє про відновлення.
-// Якщо задано секрет GH_DISPATCH_TOKEN (fine-grained token: Actions → Read and write лише для цього репозиторію),
-// воркер ще й сам запускає workflow, коли GitHub пропускає щогодинний cron.
-const kyivHour = (d = new Date()) => +new Intl.DateTimeFormat("en-GB", { timeZone: "Europe/Kyiv", hour: "2-digit", hourCycle: "h23" }).format(d);
+// ---------------------------------------------------------------- планові розсилки й зовнішній контроль (Cron Trigger воркера)
+// Воркер запускається щохвилини з :00 до :15 щогодини (cron "0-15 * * * *"):
+// - рівно о :00 розсилає ранок (06–09) та вечір / недільний тиждень (17–21) за київським часом;
+// - не більше MAX_SENDS_PER_TICK (35) Telegram-запитів за один запуск, щоб не впиратися в ліміт 50 subrequests безкоштовного тарифу;
+// - якщо підписників більше — решта досилається частинами на :01..:15 через один ключ стану `s:<name>:<date>:<slot>`;
+// - GitHub Actions (bot.py) використовує той самий ключ стану, тож дублів немає, а заміни й оголошення приходять з Actions.
+const kyivParts = (ms = Date.now()) => {
+  const parts = Object.fromEntries(
+    new Intl.DateTimeFormat("en-GB", {
+      timeZone: "Europe/Kyiv",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      hourCycle: "h23",
+    }).formatToParts(new Date(ms)).map((p) => [p.type, p.value])
+  );
+  const hour = +parts.hour === 24 ? 0 : +parts.hour;
+  return { iso: `${parts.year}-${parts.month}-${parts.day}`, hour, minute: +parts.minute };
+};
 const kyivTime = (ms) => new Intl.DateTimeFormat("uk-UA", { timeZone: "Europe/Kyiv", day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" }).format(new Date(ms));
 
+async function loadSiteForCron(env) {
+  const bundle = await env.USERS.get("s:site:bundle", "json").catch(() => null);
+  if (bundle?.index) {
+    const groups = bundle.groups || {};
+    return { index: bundle.index, getGroup: async (slug) => groups[slug] || null };
+  }
+  const site = await loadSite(env);
+  const cache = new Map();
+  return {
+    index: site.index,
+    getGroup: (slug) => {
+      if (!cache.has(slug)) cache.set(slug, groupJSON(env, site, slug).catch(() => null));
+      return cache.get(slug);
+    },
+  };
+}
+
+function buildDigestMessage(env, g, u, kind, today, tomorrow, nextMon, staleNote) {
+  if (!g) return null;
+  const sg = +u.sg || 0;
+  if (kind === "morning") {
+    if (!u.m || !g.days?.[today]) return null;
+    return [fmtDay(g, today, "Сьогодні", sg) + staleNote, dayKb(env, g, today, today)];
+  }
+  const d = dow(today);
+  if (d === 0) {
+    const hasNextWeek = [0, 1, 2, 3, 4, 5].some((i) => g.days?.[addDays(nextMon, i)]);
+    if (u.w && hasNextWeek) return [fmtWeek(g, nextMon, sg) + staleNote, weekKb(env, g, nextMon, today)];
+    if (u.w) return null;
+  }
+  if (d !== 6 && u.e && g.days?.[tomorrow]) {
+    return [fmtDay(g, tomorrow, "Завтра", sg) + staleNote, dayKb(env, g, tomorrow, today)];
+  }
+  return null;
+}
+
+async function deliverChunk(env, batch, budget) {
+  const failed = [], rateLimited = [];
+  let hit429 = false;
+  for (let i = 0; i < batch.length; i += MICRO_BATCH) {
+    if (hit429) {
+      rateLimited.push(...batch.slice(i));
+      break;
+    }
+    if (i > 0 && !env.NO_DELAY) await sleep(100);
+    const chunk = batch.slice(i, i + MICRO_BATCH);
+    await Promise.all(chunk.map(async (item) => {
+      const { u, text, kb } = item;
+      const silent = !!u.s;
+      let r = null;
+      try {
+        budget.left--;
+        r = await send(env, u.id, text, kb, silent);
+      } catch {
+        failed.push(String(u.id));
+        return;
+      }
+      const newId = r?.parameters?.migrate_to_chat_id;
+      if (!r?.ok && newId) {
+        const meta = { g: u.g, m: bit(u.m), e: bit(u.e), c: bit(u.c), w: bit(u.w), s: bit(u.s), sg: +u.sg || 0, mh: +u.mh || DEFAULTS.mh, eh: +u.eh || DEFAULTS.eh };
+        if (!(await getUser(env, newId))) await saveUser(env, newId, meta);
+        await env.USERS.delete("u:" + u.id);
+        if (budget.left > 0) {
+          try {
+            budget.left--;
+            const r2 = await send(env, newId, text, kb, silent);
+            if (r2?.ok) return;
+            if (r2?.error_code === 429) { hit429 = true; rateLimited.push({ ...item, u: { ...u, id: String(newId) } }); return; }
+          } catch { /* fall through to failed */ }
+        }
+        failed.push(String(newId));
+        return;
+      }
+      if (r?.ok) return;
+      const code = r?.error_code, desc = String(r?.description || "");
+      if ((code === 400 || code === 403) && PERM_DROP_RE.test(desc)) {
+        await env.USERS.delete("u:" + u.id);
+      } else if (code === 429) {
+        hit429 = true;
+        rateLimited.push(item);
+      } else if (code !== 400) {
+        failed.push(String(u.id));
+      }
+    }));
+  }
+  return { failed, rateLimited, hit429 };
+}
+
+async function runScheduledDigests(env, nowMs = Date.now()) {
+  const { iso: today, hour: h } = kyivParts(nowMs);
+  const kind = h >= 6 && h < MORNING_UNTIL ? "morning" : h >= 17 && h < EVENING_UNTIL ? "evening" : null;
+  if (!kind) return { skipped: "off-hours" };
+  const users = await listUsers(env);
+  if (!users.length) return { users: 0 };
+
+  const hourKey = kind === "morning" ? "mh" : "eh";
+  const slots = [...new Set(users.map((u) => +u[hourKey] || DEFAULTS[hourKey]))].filter((s) => s <= h).sort((a, b) => a - b);
+  if (!slots.length) return { skipped: "no-due-slots" };
+
+  const tomorrow = addDays(today, 1);
+  const nextMon = addDays(today, dow(today) === 0 ? 1 : 8 - dow(today));
+  const budget = { left: MAX_SENDS_PER_TICK };
+  let site = null;
+  const out = {};
+
+  for (const slot of slots) {
+    if (budget.left <= 0) break;
+    const key = `${kind}:${today}:${slot}`;
+    const st = await env.USERS.get("s:" + key, "json").catch(() => null);
+    const pendingIds = Array.isArray(st?.pending) ? st.pending.map(String) : [];
+    const retryIds = Array.isArray(st?.failed) ? st.failed.map(String) : [];
+    const tries = st ? (+st.tries || (pendingIds.length ? 0 : 1)) : 0;
+
+    if (st && !pendingIds.length && (!retryIds.length || tries >= SEND_TRIES)) continue;
+
+    if (!site) site = await loadSiteForCron(env);
+    const downTs = site.index?.source_down_since ? Date.parse(site.index.source_down_since) : NaN;
+    const staleNote = Number.isFinite(downTs)
+      ? `\n\n<i>⚠️ Сайт коледжу зараз недоступний (з ${kyivTime(downTs)}), це останній отриманий розклад.</i>`
+      : "";
+
+    let slotUsers = users.filter((u) => (+u[hourKey] || DEFAULTS[hourKey]) === slot);
+    let prevFailed = [];
+    if (pendingIds.length) {
+      const want = new Set(pendingIds);
+      slotUsers = slotUsers.filter((u) => want.has(String(u.id)));
+      prevFailed = retryIds;
+    } else if (st) {
+      const want = new Set(retryIds);
+      slotUsers = slotUsers.filter((u) => want.has(String(u.id)));
+    }
+
+    const queue = [];
+    for (const u of slotUsers) {
+      const metaG = findGroup(site.index, u.g);
+      const g = metaG ? await site.getGroup(metaG.slug) : null;
+      const msg = buildDigestMessage(env, g, u, kind, today, tomorrow, nextMon, staleNote);
+      if (msg) queue.push({ u, text: msg[0], kb: msg[1] });
+    }
+    if (!queue.length && !st) continue;
+
+    const batch = queue.slice(0, budget.left);
+    const unstarted = queue.slice(budget.left);
+    const res = batch.length ? await deliverChunk(env, batch, budget) : { failed: [], rateLimited: [], hit429: false };
+    const nextPending = [...res.rateLimited, ...unstarted].map((x) => String(x.u.id));
+    const nextFailed = [...new Set([...prevFailed, ...res.failed])];
+    const nextTries = nextPending.length ? tries : tries + 1;
+
+    await env.USERS.put("s:" + key, JSON.stringify({
+      failed: nextFailed,
+      ...(nextPending.length ? { pending: nextPending } : {}),
+      tries: nextTries,
+      at: new Date(nowMs).toISOString(),
+      by: "worker",
+    }), { expirationTtl: 3 * 86400 });
+
+    out[key] = { sent: batch.length - res.failed.length - res.rateLimited.length, pending: nextPending.length, failed: nextFailed.length };
+    if (res.hit429) break;
+  }
+  return out;
+}
+
 async function scheduled(env, nowMs = Date.now()) {
+  const digest = await runScheduledDigests(env, nowMs).catch((e) => ({ error: String(e?.message || e) }));
+  const { hour: h, minute } = kyivParts(nowMs);
+  if (minute > 0 && minute < 15) return { digest };
   const hb = await env.USERS.get("hb", "json");
-  if (!hb) return { skipped: "no heartbeat yet" };
+  if (!hb) return { digest, skipped: "no heartbeat yet" };
   const ageH = (nowMs - hb.ts) / 3600e3;
-  const h = kyivHour(new Date(nowMs));
-  const res = { ageH: Math.round(ageH * 10) / 10 };
+  const res = { digest, ageH: Math.round(ageH * 10) / 10 };
   const repo = hb.repo || env.GITHUB_REPO || "";
-  if (env.GH_DISPATCH_TOKEN && repo && h >= 6 && h <= 22 && ageH >= 0.75) {
+  if (minute >= 15 && env.GH_DISPATCH_TOKEN && repo && h >= 6 && h <= 22 && ageH >= 0.75) {
     const r = await fetch(`https://api.github.com/repos/${repo}/actions/workflows/rozklad.yml/dispatches`, {
       method: "POST",
       headers: { Authorization: "Bearer " + env.GH_DISPATCH_TOKEN, Accept: "application/vnd.github+json", "User-Agent": "pfk-rozklad-worker", "content-type": "application/json" },
