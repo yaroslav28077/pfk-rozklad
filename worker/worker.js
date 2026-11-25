@@ -39,7 +39,7 @@ async function secretOf(token) {
 // ---------------------------------------------------------------- дані з GitHub Pages або KV воркера
 async function getJSON(env, path) {
   const base = env.SITE_URL.endsWith("/") ? env.SITE_URL : env.SITE_URL + "/";
-  const r = await fetch(base + path, { cf: { cacheTtl: 120, cacheEverything: true } });
+  const r = await fetch(base + path, { cf: { cacheTtlByStatus: { "200-299": 120, "400-599": 0 } } });
   if (!r.ok) throw new Error(path + ": " + r.status);
   return r.json();
 }
@@ -49,15 +49,21 @@ async function loadSite(env) {
     getJSON(env, "data/index.json").catch(() => null),
     env.USERS.get("s:site:bundle", "json").catch(() => null),
   ]);
-  if (bundle?.index && (!pagesIndex || tsOf(bundle.index) > tsOf(pagesIndex))) {
-    return { index: bundle.index, groups: bundle.groups || null };
+  if (bundle?.index && (!pagesIndex || tsOf(bundle.index) >= tsOf(pagesIndex))) {
+    return { index: bundle.index, groups: bundle.groups || null, fallbackGroups: bundle.groups || null };
   }
-  if (pagesIndex) return { index: pagesIndex, groups: null };
+  if (pagesIndex) return { index: pagesIndex, groups: null, fallbackGroups: bundle?.groups || null };
   throw new Error("data/index.json unavailable");
 }
 // дані групи з версією з index.json або зі свіжого KV-знімка
 const groupJSON = (env, site, slug) =>
-  site.groups?.[slug] ? Promise.resolve(site.groups[slug]) : getJSON(env, `data/g/${slug}.json?v=${encodeURIComponent(site.index.hash || "")}`);
+  site.groups?.[slug]
+    ? Promise.resolve(site.groups[slug])
+    : getJSON(env, `data/g/${slug}.json?v=${encodeURIComponent(site.index.hash || "")}`)
+        .catch((err) => {
+          if (site.fallbackGroups?.[slug]) return site.fallbackGroups[slug];
+          throw err;
+        });
 const allGroups = (index) => Object.entries(index.courses).flatMap(([c, gs]) => gs.map((g) => ({ ...g, course: +c })));
 const findGroup = (index, name) => allGroups(index).find((g) => norm(g.name) === norm(name) || g.slug === String(name || "").toLowerCase());
 
