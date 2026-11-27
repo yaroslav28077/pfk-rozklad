@@ -674,3 +674,77 @@ def test_reparse_on_parser_version_and_admin_doubt_resolution(w):
         {"pair": 1, "start": "08:00", "end": "09:20", "type": "Пр", "subject": "Право", "teacher": "Садовська Т.І.", "choice": True},
     ]}}}, date(2026, 11, 17), "Сьогодні")
     assert "за вибором" in day_msg and "1 пара" in day_msg
+
+
+def test_teacher_schedule_consolidation_changes_and_digests(w):
+    # Режим викладача: дедуплікація ПІБ (крапка/ступінь/одруківка), згортання потоку, .ics, заміни й ранкова тиша у вихідний від пар день
+    sources = {
+        "c1": {
+            "kind": "schedule", "file": "c1", "title": "1 курс", "url": "https://u/1.pdf",
+            "first_seen": "2026-11-01", "on_page": True,
+            "data": {
+                "from": "2026-11-02", "to": "2026-11-06", "course": 1,
+                "groups": [{"name": "СОБ-11", "course": 1, "room": "202"},
+                           {"name": "ПД-11", "course": 1, "room": "105"}],
+                "items": [
+                    {"group": "СОБ-11", "date": "2026-11-03", "pair": 1, "start": "08:00", "end": "09:20",
+                     "type": "Лк", "subject": "Право", "teacher": "к.п.н. Тараненко К.С.", "stream": True},
+                    {"group": "ПД-11", "date": "2026-11-03", "pair": 1, "start": "08:00", "end": "09:20",
+                     "type": "Лк", "subject": "Право", "teacher": "Тараненко К.С.", "stream": True},
+                    {"group": "СОБ-11", "date": "2026-11-03", "pair": 2, "start": "09:30", "end": "10:50",
+                     "type": "Пр", "subject": "Алгебра", "teacher": "Харчнко А.В."},
+                    {"group": "СОБ-11", "date": "2026-11-04", "pair": 1, "start": "08:00", "end": "09:20",
+                     "type": "Пр", "subject": "Математика", "teacher": "Харченко А.В."},
+                    {"group": "ПД-11", "date": "2026-11-04", "pair": 2, "start": "09:30", "end": "10:50",
+                     "type": "Пр", "subject": "Спротив", "teacher": "Бородай С.О"},
+                    {"group": "ПД-11", "date": "2026-11-05", "pair": 1, "start": "08:00", "end": "09:20",
+                     "type": "Пр", "subject": "Спротив", "teacher": "Бородай С.О."},
+                ],
+            },
+        },
+        "z1": {
+            "kind": "changes", "file": "z1", "title": "Зміни", "url": "https://u/z.pdf",
+            "first_seen": "2026-11-03", "on_page": True,
+            "data": [
+                {"date": "2026-11-04", "pair": 1, "group": "СОБ-11", "subject": "Історія",
+                 "teacher": "Крайсвітня Ю.В.", "kind": "практичне", "room": "305"},
+            ],
+        },
+    }
+    out, pdfs = bot.build(sources)
+    teachers = bot.build_teachers(out)
+    # 1) Склеювання ступеня й одруківки/відсутньої крапки в єдиний запис
+    names = {t["teacher"] for t in teachers.values()}
+    assert names == {"Тараненко К.С.", "Харченко А.В.", "Бородай С.О.", "Крайсвітня Ю.В."}
+
+    tar = next(t for t in teachers.values() if t["teacher"] == "Тараненко К.С.")
+    assert tar["degree"] == "к.п.н."
+    p1 = tar["days"]["2026-11-03"]["items"][0]
+    assert p1["groups"] == ["СОБ-11", "ПД-11"] and p1["group_label"] == "СОБ-11, ПД-11"
+
+    h = bot.write_site(out, pdfs, "pfkrozkladBot", teachers=teachers)
+    assert h
+    idx = json.loads((bot.DOCS / "data" / "index.json").read_text(encoding="utf-8"))
+    assert len(idx["teachers"]) == 4
+    assert (bot.DOCS / "data" / "t" / f"{tar['slug']}.json").exists()
+    ics_txt = (bot.DOCS / "ics" / f"{tar['slug']}.ics").read_text(encoding="utf-8")
+    assert "SUMMARY:Лк Право (СОБ-11\\, ПД-11)" in ics_txt
+
+    # 2) Заміни й ранкові розсилки викладачу:
+    # 2026-11-04: Крайсвітня веде заміну, у Харченко А.В. знято математику (у день 04.11 пар у Харченка немає, але про заміну має прийти сповіщення!)
+    khar = next(t for t in teachers.values() if t["teacher"] == "Харченко А.В.")
+    kray = next(t for t in teachers.values() if t["teacher"] == "Крайсвітня Ю.В.")
+    w.worker.users = {
+        "t_tar": user("t_tar", tar["slug"], mh=6),
+        "t_khar": user("t_khar", khar["slug"], mh=6),
+        "t_kray": user("t_kray", kray["slug"], mh=6),
+    }
+    w.clock = kyiv(2026, 11, 3, 6, 30)  # 03.11: Тараненко й Харченко мають пари, Крайсвітня вільна → їй не пишемо
+    ev = {"type": "changes", "key": "chg:1", "title": "Зміни", "url": "u",
+          "rows": sources["z1"]["data"]}
+    bot.notify(out, [ev], "auto", teachers=teachers)
+    assert any("СОБ-11, ПД-11" in msg for msg in w.to("t_tar"))
+    assert any("Алгебра" in msg for msg in w.to("t_khar"))
+    assert any("Нові заміни" in msg and "Історія" in msg for msg in w.to("t_kray"))
+    assert any("Нові заміни" in msg and "заміна → Історія" in msg for msg in w.to("t_khar"))
+    assert not any("Сьогодні:" in msg for msg in w.to("t_kray"))

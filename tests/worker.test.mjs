@@ -400,3 +400,71 @@ test("callback rs: зберігає відповідь адміна в KV, ві�
   assert.ok(calls.some((c) => c.url.endsWith("/editMessageText") && /Прийнято/.test(c.body.text)));
   assert.ok(calls.some((c) => c.url.includes("/dispatches")));
 });
+
+test("режим викладача у воркері: кнопки, пошук за прізвищем і cron-розсилка", async () => {
+  const env = mkEnv();
+  const realToday = new Intl.DateTimeFormat("en-CA", { timeZone: "Europe/Kyiv", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
+  const day = "2026-11-03";
+  const emptyDay = "2026-11-04";
+  const lessonSample = { pair: 1, start: "08:00", end: "09:20", type: "Пр", subject: "Інформатика", groups: ["СОБ-11", "СОІ-12"], group_label: "СОБ-11, СОІ-12", room: "205" };
+  const idx = {
+    hash: "ht1",
+    courses: { 1: [{ name: "СОБ-11", slug: "sob-11", room: "202" }] },
+    teachers: [
+      { name: "Губанов А.Б.", slug: "t-hubanov-a-b", degree: "", courses: [1], subjects: ["Інформатика"] },
+      { name: "Гнідаш К.І.", slug: "t-hnidash-k-i", degree: "", courses: [1], subjects: ["Іноземна мова"] },
+    ],
+  };
+  const teacherDoc = {
+    kind: "teacher",
+    group: "Губанов А.Б.",
+    teacher: "Губанов А.Б.",
+    slug: "t-hubanov-a-b",
+    days: {
+      [realToday]: { items: [lessonSample] },
+      [day]: { items: [lessonSample] },
+      [emptyDay]: { items: [] },
+    },
+    changes: [],
+  };
+  await api(env, "/api/state/set", {
+    key: "site:bundle",
+    value: { hash: "ht1", updated: "2026-11-03T05:00:00+02:00", index: idx, groups: { "t-hubanov-a-b": teacherDoc } },
+    ttl: 86400,
+  });
+
+  // 1) Пошук за прізвищем у повідомленні
+  calls = [];
+  let done;
+  await worker.fetch(new Request("https://w.test/", {
+    method: "POST",
+    headers: { "X-Telegram-Bot-Api-Secret-Token": SECRET },
+    body: JSON.stringify({ message: { chat: { id: 777, type: "private" }, text: "Губанов" } }),
+  }), env, { waitUntil: (p) => (done = p) });
+  await done;
+  const saved = await env.USERS.getWithMetadata("u:777");
+  assert.equal(saved.metadata.g, "t-hubanov-a-b");
+  assert.ok(tgSends().some((c) => c.body.text.includes("Обрано розклад викладача") && c.body.text.includes("Губанов А.Б.")));
+  assert.ok(tgSends().some((c) => c.body.text.includes("Інформатика") && c.body.text.includes("СОБ-11, СОІ-12")));
+
+  // 2) Кнопка "Я викладач" → список teachers:0
+  calls = [];
+  await worker.fetch(new Request("https://w.test/", {
+    method: "POST",
+    headers: { "X-Telegram-Bot-Api-Secret-Token": SECRET },
+    body: JSON.stringify({ callback_query: { id: "cb_t", from: { id: 778 }, message: { chat: { id: 778 }, message_id: 5, text: "Обери" }, data: "teachers:0" } }),
+  }), env, { waitUntil: (p) => (done = p) });
+  await done;
+  assert.ok(calls.some((c) => c.url.endsWith("/editMessageText") && JSON.stringify(c.body.reply_markup).includes("t-hubanov-a-b")));
+
+  // 3) Cron о 06:00: 03.11 (є пара) → шле; 04.11 (порожній день) → мовчить
+  const run = (iso) => new Promise((res) => worker.scheduled({ scheduledTime: Date.parse(iso) }, env, { waitUntil: (p) => p.then(res) }));
+  calls = [];
+  await run("2026-11-03T04:00:00Z");
+  assert.equal(tgSends().length, 1);
+  assert.ok(tgSends()[0].body.text.includes("СОБ-11, СОІ-12"));
+
+  calls = [];
+  await run("2026-11-04T04:00:00Z");
+  assert.equal(tgSends().length, 0);
+});
