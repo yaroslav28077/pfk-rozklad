@@ -699,6 +699,10 @@ def test_teacher_schedule_consolidation_changes_and_digests(w):
                      "type": "Пр", "subject": "Спротив", "teacher": "Бородай С.О"},
                     {"group": "ПД-11", "date": "2026-11-05", "pair": 1, "start": "08:00", "end": "09:20",
                      "type": "Пр", "subject": "Спротив", "teacher": "Бородай С.О."},
+                    {"group": "ПД-11", "date": "2026-11-05", "pair": 2, "start": "09:30", "end": "10:50",
+                     "type": "Пр", "subject": "Всесвітня історія", "teacher": "Стешенко Ю.О."},
+                    {"group": "ПД-11", "date": "2026-11-06", "pair": 1, "start": "08:00", "end": "09:20",
+                     "type": "Пр", "subject": "Всесвітня історія", "teacher": "Гнедик Ю.О."},
                 ],
             },
         },
@@ -713,9 +717,11 @@ def test_teacher_schedule_consolidation_changes_and_digests(w):
     }
     out, pdfs = bot.build(sources)
     teachers = bot.build_teachers(out)
-    # 1) Склеювання ступеня й одруківки/відсутньої крапки в єдиний запис
+    # 1) Склеювання ступеня, одруківки/крапки та прізвища Стешенко → Гнедик
     names = {t["teacher"] for t in teachers.values()}
-    assert names == {"Тараненко К.С.", "Харченко А.В.", "Бородай С.О.", "Крайсвітня Ю.В."}
+    assert names == {"Тараненко К.С.", "Харченко А.В.", "Бородай С.О.", "Крайсвітня Ю.В.", "Гнедик Ю.О."}
+    hned = next(t for t in teachers.values() if t["teacher"] == "Гнедик Ю.О.")
+    assert "Стешенко Ю.О." in hned["aliases"]
 
     tar = next(t for t in teachers.values() if t["teacher"] == "Тараненко К.С.")
     assert tar["degree"] == "к.п.н."
@@ -725,7 +731,9 @@ def test_teacher_schedule_consolidation_changes_and_digests(w):
     h = bot.write_site(out, pdfs, "pfkrozkladBot", teachers=teachers)
     assert h
     idx = json.loads((bot.DOCS / "data" / "index.json").read_text(encoding="utf-8"))
-    assert len(idx["teachers"]) == 4
+    assert len(idx["teachers"]) == 5
+    hned_idx = next(t for t in idx["teachers"] if t["name"] == "Гнедик Ю.О.")
+    assert "Стешенко Ю.О." in hned_idx["aliases"]
     assert (bot.DOCS / "data" / "t" / f"{tar['slug']}.json").exists()
     ics_txt = (bot.DOCS / "ics" / f"{tar['slug']}.ics").read_text(encoding="utf-8")
     assert "SUMMARY:Лк Право (СОБ-11\\, ПД-11)" in ics_txt

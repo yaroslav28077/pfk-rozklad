@@ -412,7 +412,7 @@ test("режим викладача у воркері: кнопки, пошук 
     courses: { 1: [{ name: "СОБ-11", slug: "sob-11", room: "202" }] },
     teachers: [
       { name: "Губанов А.Б.", slug: "t-hubanov-a-b", degree: "", courses: [1], subjects: ["Інформатика"] },
-      { name: "Гнідаш К.І.", slug: "t-hnidash-k-i", degree: "", courses: [1], subjects: ["Іноземна мова"] },
+      { name: "Гнедик Ю.О.", aliases: ["Стешенко Ю.О."], slug: "t-hnedyk-iu-o", degree: "", courses: [1], subjects: ["Всесвітня історія"] },
     ],
   };
   const teacherDoc = {
@@ -427,9 +427,17 @@ test("режим викладача у воркері: кнопки, пошук 
     },
     changes: [],
   };
+  const hnedDoc = {
+    kind: "teacher",
+    group: "Гнедик Ю.О.",
+    teacher: "Гнедик Ю.О.",
+    slug: "t-hnedyk-iu-o",
+    days: { [realToday]: { items: [{ pair: 2, start: "09:30", end: "10:50", type: "Пр", subject: "Всесвітня історія", groups: ["ПД-11"], group_label: "ПД-11", room: "" }] } },
+    changes: [],
+  };
   await api(env, "/api/state/set", {
     key: "site:bundle",
-    value: { hash: "ht1", updated: "2026-11-03T05:00:00+02:00", index: idx, groups: { "t-hubanov-a-b": teacherDoc } },
+    value: { hash: "ht1", updated: "2026-11-03T05:00:00+02:00", index: idx, groups: { "t-hubanov-a-b": teacherDoc, "t-hnedyk-iu-o": hnedDoc } },
     ttl: 86400,
   });
 
@@ -467,4 +475,73 @@ test("режим викладача у воркері: кнопки, пошук 
   calls = [];
   await run("2026-11-04T04:00:00Z");
   assert.equal(tgSends().length, 0);
+
+  // 4) Пошук за колишнім прізвищем "Стешенко" → підписує на t-hnedyk-iu-o (Гнедик Ю.О.)
+  calls = [];
+  await worker.fetch(new Request("https://w.test/", {
+    method: "POST",
+    headers: { "X-Telegram-Bot-Api-Secret-Token": SECRET },
+    body: JSON.stringify({ message: { chat: { id: 779, type: "private" }, text: "Стешенко" } }),
+  }), env, { waitUntil: (p) => (done = p) });
+  await done;
+  assert.equal((await env.USERS.getWithMetadata("u:779")).metadata.g, "t-hnedyk-iu-o");
+});
+
+test("Mini App (docs/app.js): вибір викладача завантажує data/t/*.json і працює ?t=Стешенко", async () => {
+  const vm = await import("node:vm");
+  const { readFileSync } = await import("node:fs");
+  const appSrc = readFileSync(new URL("../docs/app.js", import.meta.url), "utf8");
+  const todayIso = new Intl.DateTimeFormat("en-CA", { timeZone: "Europe/Kyiv", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
+  const idx = {
+    hash: "v7", short: "ПФК НЮУ", bot: "pfkrozkladBot", source_page: "https://nlu.edu.ua/", updated: `${todayIso}T14:00`,
+    courses: { 1: [{ name: "СОБ-11", slug: "sob-11", room: "202" }] },
+    teachers: [
+      { name: "Губанов А.Б.", slug: "t-hubanov-a-b", degree: "", courses: [1], subjects: ["Інформатика"] },
+      { name: "Гнедик Ю.О.", aliases: ["Стешенко Ю.О."], slug: "t-hnedyk-iu-o", degree: "", courses: [1], subjects: ["Всесвітня історія"] },
+    ],
+    pdfs: [],
+  };
+  const tHub = {
+    kind: "teacher", group: "Губанов А.Б.", teacher: "Губанов А.Б.", slug: "t-hubanov-a-b", courses: [1], subjects: ["Інформатика"],
+    days: { [todayIso]: { items: [{ pair: 1, start: "08:00", end: "09:20", type: "Пр", subject: "Інформатика", groups: ["СОБ-11"], group_label: "СОБ-11", room: "305" }] } },
+    changes: [],
+  };
+  const tHned = {
+    kind: "teacher", group: "Гнедик Ю.О.", teacher: "Гнедик Ю.О.", slug: "t-hnedyk-iu-o", courses: [1], subjects: ["Всесвітня історія"],
+    days: { [todayIso]: { items: [{ pair: 2, start: "09:30", end: "10:50", type: "Пр", subject: "Всесвітня історія", groups: ["ПД-11"], group_label: "ПД-11", room: "" }] } },
+    changes: [],
+  };
+
+  const els = new Map();
+  const mkEl = (id) => ({ id, innerHTML: "", textContent: "", href: "", hidden: false, dataset: {}, classList: { toggle() {} }, addEventListener() {} });
+  for (const id of ["#view", "#title", "#subtitle", "#ics", "#banner", "#changes-dot", "#checked", "#src", "#brand-btn"]) els.set(id, mkEl(id));
+  const fetched = [];
+  const ctx = vm.createContext({
+    URL, URLSearchParams, Intl, Date, Set, Promise, Math, Object, Array, String, Number, Boolean, RegExp,
+    location: { href: "https://site.test/?t=%D0%A1%D1%82%D0%B5%D1%88%D0%B5%D0%BD%D0%BA%D0%BE", pathname: "/", search: "?t=%D0%A1%D1%82%D0%B5%D1%88%D0%B5%D0%BD%D0%BA%D0%BE", hash: "" },
+    history: { replaceState() {} },
+    localStorage: { _m: {}, getItem(k) { return this._m[k] || null; }, setItem(k, v) { this._m[k] = v; } },
+    navigator: {},
+    window: { addEventListener() {}, matchMedia: () => ({ matches: false }), scrollTo() {} },
+    document: { hidden: false, title: "", querySelector: (s) => els.get(s) || null, querySelectorAll: () => [], addEventListener() {} },
+    setInterval: () => 0,
+    fetch: async (url) => {
+      fetched.push(url);
+      if (url.startsWith("data/index.json")) return { ok: true, json: async () => idx };
+      if (url.startsWith("data/t/t-hnedyk-iu-o.json")) return { ok: true, json: async () => tHned };
+      if (url.startsWith("data/t/t-hubanov-a-b.json")) return { ok: true, json: async () => tHub };
+      throw new Error("unexpected fetch: " + url);
+    },
+  });
+  vm.runInContext(appSrc, ctx);
+  await new Promise((r) => setTimeout(r, 20));
+  assert.ok(fetched.some((u) => u.startsWith("data/t/t-hnedyk-iu-o.json")));
+  assert.equal(els.get("#title").textContent, "Гнедик Ю.О.");
+  assert.ok(els.get("#view").innerHTML.includes("Всесвітня історія") && els.get("#view").innerHTML.includes("ПД-11"));
+
+  await ctx.selectGroup("t-hubanov-a-b");
+  assert.ok(fetched.some((u) => u.startsWith("data/t/t-hubanov-a-b.json")));
+  assert.ok(!fetched.some((u) => u.startsWith("data/g/")));
+  assert.equal(els.get("#title").textContent, "Губанов А.Б.");
+  assert.ok(els.get("#view").innerHTML.includes("Інформатика") && els.get("#view").innerHTML.includes("СОБ-11"));
 });
