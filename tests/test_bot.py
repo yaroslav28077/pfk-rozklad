@@ -655,10 +655,22 @@ def test_reparse_on_parser_version_and_admin_doubt_resolution(w):
     assert f"doubt:{did}" in w.worker.kv
 
     # Адмін відповів через воркера → рішення підтягується і питання закривається
-    w.worker.kv["resolutions"] = {did: {"keep": ["Другий варіант"], "by": "900", "at": "2026-11-03T15:05:00+02:00"}}
+    w.worker.kv["resolutions"] = {did: {"keep": ["Пр Другий варіант"], "by": "900", "at": "2026-11-03T15:05:00+02:00"}}
     w.clock = kyiv(2026, 11, 3, 16)
     _, problems2 = w.run()
     assert not any(p["id"] == f"doubt:{did}" for p in problems2)
     assert any("Питання щодо розкладу закрито" in t for t in w.to(900))
     res_file = json.loads(bot.resolutions_path().read_text(encoding="utf-8"))
-    assert res_file[did]["keep"] == ["Другий варіант"]
+    assert res_file[did]["keep"] == ["Пр Другий варіант"]
+
+    # Розрізнення "Лк" та "Пр" з однаковою назвою предмета + формат "за вибором" і підрахунок пар
+    kept = bot._apply_resolutions([
+        {"pair": 3, "start": "11:00", "end": "12:15", "type": "Лк", "subject": "Спротив", "doubt": "d1"},
+        {"pair": 3, "start": "11:00", "end": "12:15", "type": "Пр", "subject": "Спротив", "doubt": "d1"},
+    ], {"d1": {"keep": ["Пр Спротив"]}})
+    assert len(kept) == 1 and kept[0]["type"] == "Пр" and "doubt" not in kept[0]
+    day_msg = bot.fmt_day({"group": "СОБ-21", "days": {"2026-11-17": {"items": [
+        {"pair": 1, "start": "08:00", "end": "09:20", "type": "Пр", "subject": "Етика", "teacher": "Поволоцька М.О.", "choice": True},
+        {"pair": 1, "start": "08:00", "end": "09:20", "type": "Пр", "subject": "Право", "teacher": "Садовська Т.І.", "choice": True},
+    ]}}}, date(2026, 11, 17), "Сьогодні")
+    assert "за вибором" in day_msg and "1 пара" in day_msg

@@ -394,7 +394,7 @@ test("callback rs: зберігає відповідь адміна в KV, ві�
   }), env, { waitUntil: (p) => (done = p) });
   await done;
   const saved = await env.USERS.get("s:resolutions", "json");
-  assert.deepEqual(saved.d123.keep, ["Криміналістичні експертизи"]);
+  assert.deepEqual(saved.d123.keep, ["Пр Криміналістичні експертизи"]);
   assert.equal(saved.d123.by, "900");
   assert.ok(calls.some((c) => c.url.endsWith("/answerCallbackQuery") && c.body.text === "Прийнято"));
   assert.ok(calls.some((c) => c.url.endsWith("/editMessageText") && /Прийнято/.test(c.body.text)));
