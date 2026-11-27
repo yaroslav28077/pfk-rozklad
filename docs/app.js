@@ -1,10 +1,12 @@
 /* Розклад ПФК — клієнтська частина. Дані: data/index.json + data/g/<група>.json (генерує scripts/bot.py). */
 const DAYS = ["Неділя", "Понеділок", "Вівторок", "Середа", "Четвер", "П'ятниця", "Субота"];
 const SHORT = ["Нд", "Пн", "Вт", "Ср", "Чт", "Пт", "Сб"];
-let SITE = null;   // дані обраної групи
-let INDEX = null;  // список курсів і груп
+let SITE = null;   // дані обраної групи або викладача
+let INDEX = null;  // список курсів, груп і викладачів
 let TAB = location.hash.replace("#", "") || "today";
 let WEEK_SEL = null;
+let PICK_MODE = "student";
+const isTeacher = () => !!(SITE && SITE.kind === "teacher");
 
 const $ = (s) => document.querySelector(s);
 const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
@@ -94,9 +96,12 @@ function lessonHTML(it, state, dayUrl = "") {
   if (it.cancelled) cls.push("cancelled");
   const chip = it.type ? `<span class="chip ${it.type === "Лк" ? "lk" : "pr"}">${it.type === "Лк" ? "Лекція" : it.type === "Пр" ? "Практичне" : esc(it.type)}</span>` : "";
   const room = it.room ? (/^\d+$/.test(it.room) ? `ауд. ${esc(it.room)}` : esc(it.room)) : "";
-  const info = [it.subgroup ? `${it.subgroup} підгр.` : it.choice ? "за вибором" : "", it.teacher ? esc(it.teacher) : "", it.online ? "онлайн" : room].filter(Boolean).map((x) => `<span>${x}</span>`).join("");
+  const grpChip = isTeacher() && it.group_label ? `<span class="chip grp">${esc(it.group_label)}</span>` : "";
+  const info = isTeacher()
+    ? [grpChip, it.choice ? "за вибором" : "", it.online ? "онлайн" : (room && room !== "потік" ? room : it.stream ? "потік" : "")].filter(Boolean).map((x) => x.startsWith("<span") ? x : `<span>${x}</span>`).join("")
+    : [it.subgroup ? `${it.subgroup} підгр.` : it.choice ? "за вибором" : "", it.teacher ? esc(it.teacher) : "", it.online ? "онлайн" : room].filter(Boolean).map((x) => `<span>${x}</span>`).join("");
   let note = "";
-  if (it.cancelled) note = `<div class="note">Вікно — пари немає</div>`;
+  if (it.cancelled) note = `<div class="note">${esc(it.cancel_note || "Вікно — пари немає")}</div>`;
   else if (it.changed) note = `<div class="note">Заміна${it.was ? ` · було: ${esc(it.was)}` : ""}</div>`;
   else if (it.doubt) note = `<div class="note warn">⚠ Можлива неточність у PDF — ${dayUrl ? `<a href="${esc(dayUrl)}" target="_blank" rel="noopener">звірте з офіційним розкладом</a>` : "звірте з офіційним розкладом"}</div>`;
   return `<article class="${cls.join(" ")}" style="--c:${c};--cs:${c}1a">
@@ -143,18 +148,19 @@ function heroHTML(day) {
   const nxt = L.find((i) => toSec(i.start) > now);
   if (cur) {
     const total = toSec(cur.end) - toSec(cur.start), passed = now - toSec(cur.start);
+    const curWho = isTeacher() ? cur.group_label : cur.teacher;
     return `<section class="hero fade"><div class="label">Зараз · ${cur.pair} пара</div>
       <div class="big">${esc(cur.subject)}</div>
-      <div class="meta">${[cur.teacher, cur.room && /^\d+$/.test(cur.room) ? "ауд. " + cur.room : cur.room].filter(Boolean).map(esc).join(" · ")}</div>
+      <div class="meta">${[curWho, cur.room && /^\d+$/.test(cur.room) ? "ауд. " + cur.room : cur.room].filter(Boolean).map(esc).join(" · ")}</div>
       <div class="timer"><b data-countdown="${toSec(cur.end)}">${dur(toSec(cur.end) - now)}</b><span>до кінця</span></div>
       <div class="bar"><i style="width:${Math.min(100, (passed / total) * 100).toFixed(1)}%"></i></div>
-      ${nxt ? `<div class="meta" style="margin-top:10px">Далі о ${esc(nxt.start)} — ${esc(nxt.subject)}</div>` : `<div class="meta" style="margin-top:10px">Це остання пара сьогодні</div>`}</section>`;
+      ${nxt ? `<div class="meta" style="margin-top:10px">Далі о ${esc(nxt.start)} — ${esc(nxt.subject)}${isTeacher() && nxt.group_label ? ` (${esc(nxt.group_label)})` : ""}</div>` : `<div class="meta" style="margin-top:10px">Це остання пара сьогодні</div>`}</section>`;
   }
   if (nxt) {
     const first = nxt === L[0];
     return `<section class="hero fade"><div class="label">${first ? "Перша пара" : "Наступна пара"} · ${nxt.pair}</div>
       <div class="big">${esc(nxt.subject)}</div>
-      <div class="meta">о ${esc(nxt.start)}${nxt.room && /^\d+$/.test(nxt.room) ? " · ауд. " + esc(nxt.room) : ""}</div>
+      <div class="meta">о ${esc(nxt.start)}${isTeacher() && nxt.group_label ? ` · ${esc(nxt.group_label)}` : ""}${nxt.room && /^\d+$/.test(nxt.room) ? " · ауд. " + esc(nxt.room) : ""}</div>
       <div class="timer"><b data-countdown="${toSec(nxt.start)}">${dur(toSec(nxt.start) - now)}</b><span>до початку</span></div></section>`;
   }
   return `<section class="hero calm fade"><div class="label">На сьогодні все</div><div class="big">Пари закінчились</div>
@@ -200,25 +206,41 @@ function render() {
     v.querySelectorAll("[data-day]").forEach((b) => b.addEventListener("click", () => { WEEK_SEL = b.dataset.day; render(); }));
   } else if (TAB === "changes") {
     const rows = SITE.changes.filter((z) => z.date >= addDays(today, -7)).sort((a, b) => (a.date + a.pair).localeCompare(b.date + b.pair));
-    v.innerHTML = `<div class="section-title"><h2>Заміни</h2><span>${esc(SITE.group)}</span></div>` +
+    v.innerHTML = `<div class="section-title"><h2>Заміни</h2><span>${esc(isTeacher() ? SITE.teacher : SITE.group)}</span></div>` +
       (rows.length ? `<div class="list">${rows.map((z) => {
-        const win = z.subject.toLowerCase() === "вікно";
-        return `<div class="change ${win ? "win" : ""} ${z.date < today ? "past" : ""} fade"><div class="d">${ddmm(z.date)}<small>${SHORT[dow(z.date)]} · ${z.pair} п.</small></div>
-          <div class="body"><b>${win ? "Вікно — пари немає" : esc(z.subject)}</b><span>${[z.teacher, z.kind, z.group !== SITE.group ? z.group : ""].filter(Boolean).map(esc).join(" · ")}</span></div></div>`;
+        const removed = isTeacher() && z.role === "removed";
+        const win = removed ? z.to === "вікно" : z.subject.toLowerCase() === "вікно";
+        const headTxt = removed ? `${esc(z.subject)} — ${win ? "вікно" : "заміна → " + esc(z.to || "")}` : win ? "Вікно — пари немає" : esc(z.subject);
+        const subTxt = isTeacher()
+          ? [z.group, z.kind, z.room ? "ауд. " + z.room : ""].filter(Boolean).map(esc).join(" · ")
+          : [z.teacher, z.kind, z.group !== SITE.group ? z.group : ""].filter(Boolean).map(esc).join(" · ");
+        return `<div class="change ${win || removed ? "win" : ""} ${z.date < today ? "past" : ""} fade"><div class="d">${ddmm(z.date)}<small>${SHORT[dow(z.date)]} · ${z.pair} п.</small></div>
+          <div class="body"><b>${headTxt}</b><span>${subTxt}</span></div></div>`;
       }).join("")}</div>` : `<div class="empty">${svg("check")}Замін немає</div>`) +
       `<p class="muted" style="margin:12px 2px">Минулі заміни показуються блідими ще тиждень.</p>`;
   } else if (TAB === "pick") {
     v.innerHTML = pickerHTML();
-    v.querySelectorAll("[data-group]").forEach((b) => b.addEventListener("click", () => selectGroup(b.dataset.group)));
+    v.querySelectorAll("[data-pmode]").forEach((b) => b.addEventListener("click", () => { PICK_MODE = b.dataset.pmode; render(); }));
+    const bindPick = () => v.querySelectorAll("[data-group]").forEach((b) => b.addEventListener("click", () => selectGroup(b.dataset.group)));
+    bindPick();
+    const q = $("#teacher-q");
+    if (q) {
+      q.addEventListener("input", () => {
+        $("#teacher-list").innerHTML = teacherCardsHTML(q.value);
+        bindPick();
+      });
+    }
     return;
   } else {
     const ics = `ics/${SITE.slug}.ics`;
     const webcal = new URL(ics, location.href).href.replace(/^https?:/, "webcal:");
-    const pdfs = INDEX.pdfs.filter((p) => p.kind === "changes" || p.course === SITE.course);
+    const pdfs = INDEX.pdfs.filter((p) => p.kind === "changes" || (isTeacher() ? (SITE.courses || []).includes(p.course) : p.course === SITE.course));
+    const nowLabel = isTeacher() ? esc(SITE.teacher) : `${esc(SITE.group)}, ${SITE.course} курс`;
+    const botDesc = isTeacher() ? `Розклад ${esc(SITE.teacher)} по всіх курсах і заміни одразу` : `Розклад ${esc(SITE.group)} щоранку й заміни одразу`;
     v.innerHTML = `<div class="section-title"><h2>Ще</h2></div>
       <div class="card">
-        <a class="link-row" href="#pick" id="change-group">${svg("users")}<div>Змінити групу<small>Зараз: ${esc(SITE.group)}, ${SITE.course} курс</small></div></a>
-        ${INDEX.bot ? `<a class="link-row" href="https://t.me/${esc(INDEX.bot)}?start=${esc(SITE.slug)}" target="_blank" rel="noopener">${svg("bot")}<div>Telegram-бот<small>Розклад ${esc(SITE.group)} щоранку й заміни одразу</small></div></a>` : ""}
+        <a class="link-row" href="#pick" id="change-group">${svg("users")}<div>${isTeacher() ? "Змінити викладача або групу" : "Змінити групу"}<small>Зараз: ${nowLabel}</small></div></a>
+        ${INDEX.bot ? `<a class="link-row" href="https://t.me/${esc(INDEX.bot)}?start=${esc(SITE.slug)}" target="_blank" rel="noopener">${svg("bot")}<div>Telegram-бот<small>${botDesc}</small></div></a>` : ""}
         <a class="link-row" href="${esc(webcal)}">${svg("cal")}<div>Підписатися в календарі<small>Google Calendar / iPhone — оновлюється сам</small></div></a>
         <a class="link-row" href="${esc(ics)}" download>${svg("file")}<div>Завантажити .ics<small>Разовий імпорт у календар</small></div></a>
         <a class="link-row" href="#" id="install">${svg("phone")}<div>Встановити як застосунок<small id="install-hint">Іконка на головному екрані телефону</small></div></a>
@@ -226,7 +248,7 @@ function render() {
       </div>
       <div class="section-title"><h2>PDF на сайті коледжу</h2></div>
       <div class="card">${pdfs.map((p) => `<a class="link-row" href="${esc(p.url)}" target="_blank" rel="noopener">${svg("file")}<div>${esc(p.title)}</div></a>`).join("") || '<p class="muted">Немає</p>'}</div>`;
-    $("#change-group").addEventListener("click", (e) => { e.preventDefault(); TAB = "pick"; render(); });
+    $("#change-group").addEventListener("click", (e) => { e.preventDefault(); PICK_MODE = isTeacher() ? "teacher" : "student"; TAB = "pick"; render(); });
     setupInstall();
   }
 }
@@ -259,30 +281,73 @@ function tick() {
   if (rerender) render();
 }
 
-/* ---------- вибір групи ---------- */
+/* ---------- вибір групи або викладача ---------- */
+function teacherCardsHTML(query = "") {
+  const q = String(query || "").trim().toLowerCase();
+  const list = (INDEX.teachers || []).filter((t) =>
+    !q || t.name.toLowerCase().includes(q) || (t.subjects || []).some((s) => s.toLowerCase().includes(q))
+  );
+  if (!list.length) return `<div class="empty">${svg("users")}Нікого не знайдено за «${esc(query)}»</div>`;
+  return `<div class="days pick teachers">${list.map((t) =>
+    `<button data-group="${esc(t.slug)}" aria-label="Обрати викладача ${esc(t.name)}" class="${SITE && SITE.slug === t.slug ? "active" : ""}"><span>${esc(t.name)}</span><small>${esc((t.subjects || []).slice(0, 2).join(" · ") || t.degree || "Викладач")}</small></button>`
+  ).join("")}</div>`;
+}
+
 function pickerHTML() {
-  return `<div class="section-title"><h2>Обери свою групу</h2></div>` + Object.entries(INDEX.courses).map(([c, gs]) =>
+  const hasT = (INDEX.teachers || []).length > 0;
+  const seg = hasT ? `<div class="seg" role="tablist" aria-label="Режим розкладу">
+    <button type="button" data-pmode="student" role="tab" aria-selected="${PICK_MODE === "student"}" class="${PICK_MODE === "student" ? "active" : ""}">👥 Студент</button>
+    <button type="button" data-pmode="teacher" role="tab" aria-selected="${PICK_MODE === "teacher"}" class="${PICK_MODE === "teacher" ? "active" : ""}">🎓 Викладач</button>
+  </div>` : "";
+  if (hasT && PICK_MODE === "teacher") {
+    return `${seg}<div class="section-title"><h2>Обери викладача</h2><span>${INDEX.teachers.length}</span></div>
+      <input type="search" id="teacher-q" class="search-input" placeholder="Пошук за прізвищем або дисципліною…" aria-label="Пошук викладача" autocomplete="off">
+      <div id="teacher-list">${teacherCardsHTML()}</div>`;
+  }
+  return `${seg}<div class="section-title"><h2>Обери свою групу</h2></div>` + Object.entries(INDEX.courses).map(([c, gs]) =>
     `<div class="section-title"><h2>${esc(c)} курс</h2></div><div class="days pick">${gs.map((g) =>
-      `<button data-group="${esc(g.name)}" aria-label="Обрати групу ${esc(g.name)}" class="${SITE && SITE.group === g.name ? "active" : ""}">${esc(g.name)}${g.room ? `<small>${esc(g.room)} ауд.</small>` : ""}</button>`).join("")}</div>`).join("");
+      `<button data-group="${esc(g.name)}" aria-label="Обрати групу ${esc(g.name)}" class="${SITE && SITE.group === g.name && !isTeacher() ? "active" : ""}">${esc(g.name)}${g.room ? `<small>${esc(g.room)} ауд.</small>` : ""}</button>`).join("")}</div>`).join("");
 }
-function groupByName(name) {
-  for (const gs of Object.values(INDEX.courses)) for (const g of gs) if (g.name === name || g.slug === name) return g;
-  return null;
+
+function targetByNameOrSlug(name) {
+  const raw = String(name || "").trim();
+  if (!raw) return null;
+  for (const gs of Object.values(INDEX.courses)) {
+    for (const g of gs) if (g.name === raw || g.slug === raw) return { ...g, kind: "group" };
+  }
+  const low = raw.toLowerCase();
+  const firstWord = low.split(/\s+/)[0];
+  return (INDEX.teachers || []).find((t) => t.name === raw || t.slug === low || t.name.toLowerCase() === low)
+    || (firstWord.length >= 3 ? (INDEX.teachers || []).find((t) => t.name.toLowerCase().startsWith(firstWord + " ")) : null)
+    || null;
 }
+
 async function selectGroup(name) {
-  const g = groupByName(name);
+  const g = targetByNameOrSlug(name);
   if (!g) { TAB = "pick"; render(); return; }
+  const isT = g.kind === "teacher";
+  const path = isT ? `data/t/${g.slug}.json` : `data/g/${g.slug}.json`;
   try {
-    SITE = await (await fetch(`data/g/${g.slug}.json?` + (INDEX.hash || Date.now()), { cache: "no-cache" })).json();
+    SITE = await (await fetch(`${path}?` + (INDEX.hash || Date.now()), { cache: "no-cache" })).json();
   } catch (e) {
     $("#view").innerHTML = `<div class="empty">${svg("file")}Не вдалося завантажити розклад. Перевір інтернет і онови сторінку.</div>`;
     return;
   }
-  localStorage.setItem("group", g.name);
-  const u = new URL(location.href); u.searchParams.set("g", g.name); history.replaceState(null, "", u.pathname + u.search + location.hash);
-  $("#title").textContent = `Розклад ${SITE.group}`;
-  document.title = `Розклад ${SITE.group} · ${INDEX.short || "ПФК НЮУ"}`;
-  $("#subtitle").textContent = `${SITE.course} курс · ${INDEX.short || "ПФК НЮУ"}${SITE.room ? ` · ${SITE.room} ауд.` : ""}`;
+  localStorage.setItem("group", isT ? g.slug : g.name);
+  const u = new URL(location.href);
+  if (isT) { u.searchParams.delete("g"); u.searchParams.set("t", SITE.teacher); }
+  else { u.searchParams.delete("t"); u.searchParams.set("g", SITE.group); }
+  history.replaceState(null, "", u.pathname + u.search + location.hash);
+  if (isT) {
+    $("#title").textContent = SITE.teacher;
+    document.title = `Розклад · ${SITE.teacher} · ${INDEX.short || "ПФК НЮУ"}`;
+    const subParts = [SITE.degree, "Викладач", (SITE.courses || []).length ? `${SITE.courses.join(", ")} курс` : ""].filter(Boolean);
+    $("#subtitle").textContent = subParts.join(" · ");
+  } else {
+    $("#title").textContent = `Розклад ${SITE.group}`;
+    document.title = `Розклад ${SITE.group} · ${INDEX.short || "ПФК НЮУ"}`;
+    $("#subtitle").textContent = `${SITE.course} курс · ${INDEX.short || "ПФК НЮУ"}${SITE.room ? ` · ${SITE.room} ауд.` : ""}`;
+  }
   $("#ics").href = `ics/${SITE.slug}.ics`;
   const today = kyivNow().iso;
   const banner = $("#banner");
@@ -310,8 +375,11 @@ async function init() {
     TAB = b.dataset.tab; history.replaceState(null, "", location.pathname + location.search + "#" + TAB); render(); window.scrollTo({ top: 0, behavior: "smooth" });
   }));
   if (!["today", "tomorrow", "week", "changes", "more"].includes(TAB)) TAB = "today";
-  const wanted = new URLSearchParams(location.search).get("g") || localStorage.getItem("group");
-  if (wanted && groupByName(wanted)) await selectGroup(wanted);
+  const qs = new URLSearchParams(location.search);
+  const tParam = qs.get("t");
+  const wanted = tParam || qs.get("g") || localStorage.getItem("group");
+  if (tParam) PICK_MODE = "teacher";
+  if (wanted && targetByNameOrSlug(wanted)) await selectGroup(wanted);
   else { TAB = "pick"; $("#subtitle").textContent = INDEX.short || "ПФК НЮУ"; render(); }
   setInterval(() => SITE && tick(), 20000);
   document.addEventListener("visibilitychange", () => { if (!document.hidden && SITE) render(); });
