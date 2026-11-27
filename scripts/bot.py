@@ -114,7 +114,8 @@ def ddmm_hm(iso):
 
 TR = dict(zip("абвгґдеєжзиіїйклмнопрстуфхцчшщьюя", "a b v h g d e ie zh z y i i i k l m n o p r s t u f kh ts ch sh shch  iu ia".split(" ")))
 UK_ORDER = {ch: i for i, ch in enumerate("АБВГҐДЕЄЖЗИІЇЙКЛМНОПРСТУФХЦЧШЩЬЮЯ")}
-TEACHER_ALIASES = {"ХАРЧНКО": "Харченко"}
+TEACHER_ALIASES = {"ХАРЧНКО": "Харченко", "СТЕШЕНКО": "Гнедик"}
+TEACHER_SURNAME_ALIASES = {"СТЕШЕНКО": "Гнедик"}
 TEACHER_DEG_RE = re.compile(r"^\s*((?:(?:[а-яіїє]{1,4}\.){1,4}\s*)+)", re.I)
 TEACHER_NAME_RE = re.compile(r"^([А-ЯІЇЄҐ][а-яіїєґ'’ʼ\-]+),?\s+([А-ЯІЇЄҐ])\.\s*([А-ЯІЇЄҐ])\.?\s*$")
 
@@ -572,13 +573,25 @@ def _canonical_teacher_map(out):
                 orig = next(p[2] for p in parsed.values() if p[2].upper() == match and p[3].upper() == uinit)
                 canon_sur[(usur, uinit)] = orig
     res = {}
+    aliases_by_slug = {}
+    for raw_r in raw_names:
+        s0 = " ".join(parse._apos(str(raw_r or "")).split()).strip(" ,;")
+        md = TEACHER_DEG_RE.match(s0)
+        if md and md.end() < len(s0) and re.match(r"^[А-ЯІЇЄҐ]", s0[md.end():].strip()):
+            s0 = s0[md.end():].strip()
+        m0 = TEACHER_NAME_RE.match(s0)
+        if m0 and m0.group(1).upper() in TEACHER_SURNAME_ALIASES:
+            orig_name = f"{m0.group(1)} {m0.group(2)}.{m0.group(3)}."
+            ts_target = f"t-{slug(f'{TEACHER_SURNAME_ALIASES[m0.group(1).upper()]} {m0.group(2)}.{m0.group(3)}.')}"
+            aliases_by_slug.setdefault(ts_target, set()).add(orig_name)
     for r, (name, deg, sur, init) in parsed.items():
         uk = (sur.upper(), init.upper())
         target_sur = canon_sur.get(uk, sur)
         cname = f"{target_sur} {init}".strip()
         mkey = (target_sur.upper(), init.upper())
         cdeg = degrees.get(mkey) or degrees.get(uk) or deg
-        res[r] = {"name": cname, "degree": cdeg, "slug": f"t-{slug(cname)}"}
+        ts = f"t-{slug(cname)}"
+        res[r] = {"name": cname, "degree": cdeg, "slug": ts, "aliases": sorted(aliases_by_slug.get(ts, ()))}
     return res
 
 
@@ -751,6 +764,7 @@ def build_teachers(out):
             "kind": "teacher",
             "group": info["name"],
             "teacher": info["name"],
+            "aliases": info.get("aliases", []),
             "degree": info["degree"],
             "slug": ts,
             "courses": sorted(tb["courses"]),
@@ -777,10 +791,13 @@ def write_site(out, pdfs, bot_name, status=None, teachers=None):
         build_ics(g, idir / f"{g['slug']}.ics")
     teachers_idx = []
     for ts, t in teachers.items():
-        teachers_idx.append({
+        ent = {
             "name": t["teacher"], "slug": ts, "degree": t["degree"],
             "courses": t["courses"], "subjects": t["subjects"][:4],
-        })
+        }
+        if t.get("aliases"):
+            ent["aliases"] = t["aliases"]
+        teachers_idx.append(ent)
         jsave(tdir / f"{ts}.json", t, compact=True)
         build_ics(t, idir / f"{ts}.ics")
     index = {"college": CFG["college"], "short": CFG.get("short", ""), "bot": bot_name, "source_page": PAGE,
@@ -1544,7 +1561,8 @@ def cmd_show(a):
     g = (out.get(a.group)
          or next((v for k, v in out.items() if parse._norm(k) == nq), None)
          or teachers.get(a.group)
-         or next((v for v in teachers.values() if parse._norm(v["teacher"]) == nq or nq in parse._norm(v["teacher"])), None))
+         or next((v for v in teachers.values() if parse._norm(v["teacher"]) == nq or nq in parse._norm(v["teacher"])
+                  or any(nq in parse._norm(al) for al in v.get("aliases") or [])), None))
     if not g:
         sys.exit(f"Не знайдено. Групи: {', '.join(sorted(out))}")
     d = date.fromisoformat(a.date) if a.date else today()

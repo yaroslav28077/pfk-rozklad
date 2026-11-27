@@ -79,13 +79,20 @@ const findTeacher = (index, q) => {
   const s = String(q || "").trim();
   if (!s) return null;
   const ns = norm(s);
-  return allTeachers(index).find((t) => t.slug === s.toLowerCase() || norm(t.name) === ns) || null;
+  return allTeachers(index).find((t) =>
+    t.slug === s.toLowerCase()
+    || norm(t.name) === ns
+    || (t.aliases || []).some((a) => norm(a) === ns)
+  ) || null;
 };
 const findTarget = (index, q) => findGroup(index, q) || findTeacher(index, q);
 const searchTeachers = (index, q) => {
   const nq = norm(q);
   if (nq.length < 3) return [];
-  return allTeachers(index).filter((t) => norm(t.name).startsWith(nq) || norm(t.name).includes(nq));
+  return allTeachers(index).filter((t) =>
+    norm(t.name).startsWith(nq) || norm(t.name).includes(nq)
+    || (t.aliases || []).some((a) => norm(a).startsWith(nq) || norm(a).includes(nq))
+  );
 };
 
 // підписники (KV)
@@ -240,7 +247,7 @@ function weekKb(env, g, monday, today = kyivISO()) {
   ] };
 }
 const backKb = (env, g) => ({ inline_keyboard: [[{ text: "📅 Сьогодні", callback_data: "d:" + kyivISO() }, { text: "➡️ Завтра", callback_data: "d:" + schoolDay(kyivISO(), 1) }], [{ text: "🌐 Сайт", url: siteLink(env, g) }]] });
-const siteLink = (env, g) => (env.SITE_URL.endsWith("/") ? env.SITE_URL : env.SITE_URL + "/") + (g?.kind === "teacher" ? "?t=" + encodeURIComponent(g.teacher || g.group) : "?g=" + encodeURIComponent(g.group));
+const siteLink = (env, g) => (env.SITE_URL.endsWith("/") ? env.SITE_URL : env.SITE_URL + "/") + (g?.kind === "teacher" || String(g?.slug || "").startsWith("t-") ? "?t=" + encodeURIComponent(g.teacher || g.group) : "?g=" + encodeURIComponent(g.group));
 const toggle = (on, label, data) => ({ text: `${on ? "✅" : "▫️"} ${label}`, callback_data: data, ...(on ? { style: "success" } : {}) });
 function settingsText(u, g) {
   const isT = g?.kind === "teacher";
