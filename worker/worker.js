@@ -18,6 +18,7 @@ const norm = (s) => String(s || "").toUpperCase().replace(/[\s\-–'’ʼ]/g, ""
 const plural = (n) => (n % 10 === 1 && n % 100 !== 11 ? "пара" : n % 10 >= 2 && n % 10 <= 4 && !(n % 100 >= 12 && n % 100 <= 14) ? "пари" : "пар");
 // m/e/c/w — ранок/вечір/заміни/огляд тижня (1/0); mh/eh — година ранкової/вечірньої розсилки; s — беззвучно; sg — підгрупа (0 = усі)
 const DEFAULTS = { m: 1, e: 1, c: 1, w: 1, s: 0, sg: 0, mh: 6, eh: 18 };
+const MENU_VER = 2;
 const MORNING_HOURS = [6, 7, 8, 9];
 const EVENING_HOURS = [17, 18, 19, 20, 21];
 const MORNING_UNTIL = 13;
@@ -68,6 +69,79 @@ async function loadConsultations(env, site) {
   return fromPages || site?.consultations || { items: [], sources: [] };
 }
 const normSubj = (s) => String(s || "").toLowerCase().replace(/\([^)]*\)/g, " ").replace(/[«»"'’ʼ.,;]/g, " ").replace(/\s+/g, " ").trim();
+const normTeacher = (s) => String(s || "")
+  .trim()
+  .replace(/^(?:(?:(?:к|д)\.\s*[а-яіїєґ]+\.\s*н\.|д\.\s*ф\.|доц\.|проф\.|ст\.\s*викл\.|викл\.)[\s,]*)+/i, "")
+  .replace(/\s+/g, " ")
+  .replace(/\.+$/, "")
+  .toLowerCase();
+const surnameOf = (nt) => nt.split(/\s+/)[0] || "";
+function myConsultSlots(items, site) {
+  if (!items?.length) return [];
+  if (!site) return items;
+  if (site.kind === "teacher") return items.filter((c) => c.slug === site.slug);
+  const teacherSubjs = new Map();
+  const addFrom = (includeChanged) => {
+    for (const d of Object.values(site.days || {})) {
+      for (const it of d.items || []) {
+        if (it.cancelled || (!includeChanged && it.changed) || !it.teacher) continue;
+        const k = normTeacher(it.teacher);
+        if (!k) continue;
+        if (!teacherSubjs.has(k)) teacherSubjs.set(k, new Set());
+        if (it.subject) teacherSubjs.get(k).add(normSubj(it.subject));
+      }
+    }
+  };
+  addFrom(false);
+  if (!teacherSubjs.size) addFrom(true);
+  const bySurname = new Map();
+  for (const k of teacherSubjs.keys()) {
+    const sn = surnameOf(k);
+    if (sn.length >= 3) {
+      if (!bySurname.has(sn)) bySurname.set(sn, []);
+      bySurname.get(sn).push(k);
+    }
+  }
+  const consSlugsBySurname = new Map();
+  for (const c of items) {
+    for (const nm of [c.teacher, ...(c.aliases || [])]) {
+      const sn = surnameOf(normTeacher(nm));
+      if (sn.length >= 3) {
+        if (!consSlugsBySurname.has(sn)) consSlugsBySurname.set(sn, new Set());
+        consSlugsBySurname.get(sn).add(c.slug);
+      }
+    }
+  }
+  const matched = [];
+  for (const c of items) {
+    const names = [c.teacher, ...(c.aliases || [])].map(normTeacher).filter(Boolean);
+    let keys = names.filter((n) => teacherSubjs.has(n));
+    if (!keys.length) {
+      for (const n of names) {
+        const sn = surnameOf(n);
+        if (sn.length >= 3 && consSlugsBySurname.get(sn)?.size === 1 && bySurname.has(sn)) {
+          keys = bySurname.get(sn);
+          break;
+        }
+      }
+    }
+    if (keys.length) matched.push({ c, keys });
+  }
+  const bySlug = new Map();
+  for (const m of matched) {
+    if (!bySlug.has(m.c.slug)) bySlug.set(m.c.slug, []);
+    bySlug.get(m.c.slug).push(m);
+  }
+  const keepIds = new Set();
+  for (const arr of bySlug.values()) {
+    if (arr.length === 1) { keepIds.add(arr[0].c.id); continue; }
+    const subjs = new Set();
+    for (const m of arr) for (const k of m.keys) for (const s of teacherSubjs.get(k) || []) subjs.add(s);
+    const refined = arr.filter((m) => (m.c.subjects || []).some((s) => subjs.has(normSubj(s))));
+    for (const m of (refined.length ? refined : arr)) keepIds.add(m.c.id);
+  }
+  return items.filter((c) => keepIds.has(c.id));
+}
 const toMin = (hm) => { const [h, m] = String(hm || "0:0").split(":").map(Number); return h * 60 + m; };
 // дані групи/викладача з версією з index.json або зі свіжого KV-знімка
 const groupJSON = (env, site, slug) => {
@@ -119,7 +193,7 @@ async function getUser(env, id) {
 }
 const bit = (v) => (v ? 1 : 0);
 const saveUser = (env, id, u) => env.USERS.put("u:" + id, "", { metadata: {
-  g: u.g, m: bit(u.m), e: bit(u.e), c: bit(u.c), w: bit(u.w), s: bit(u.s), sg: +u.sg || 0, mh: +u.mh || DEFAULTS.mh, eh: +u.eh || DEFAULTS.eh } });
+  g: u.g, m: bit(u.m), e: bit(u.e), c: bit(u.c), w: bit(u.w), s: bit(u.s), sg: +u.sg || 0, mh: +u.mh || DEFAULTS.mh, eh: +u.eh || DEFAULTS.eh, ...(u.mv ? { mv: +u.mv } : {}) } });
 // підгрупа: показуємо спільні пари і пари своєї підгрупи (для викладачів підгруп немає)
 const mine = (items, sg) => (sg ? items.filter((x) => !x.subgroup || x.subgroup === sg) : items);
 const hasSubgroups = (g) => g?.kind !== "teacher" && Object.values(g.days).some((d) => d.items.some((x) => x.subgroup));
@@ -234,17 +308,9 @@ function consultView(env, g, cons, mode, subs = [], query = "") {
     list = searchConsultItems(items, query);
     title = `📝 <b>Пошук відпрацювань:</b> «${esc(query)}»`;
   } else if (mode === "mine") {
-    if (g?.kind === "teacher") {
-      list = items.filter((c) => c.slug === g.slug);
-      title = `📝 <b>Мої консультації</b> · 🎓 ${esc(g.teacher)}`;
-    } else if (g) {
-      const mySubj = new Set();
-      for (const d of Object.values(g.days || {})) for (const it of d.items || []) if (it.subject) mySubj.add(normSubj(it.subject));
-      list = items.filter((c) => (c.subjects || []).some((s) => mySubj.has(normSubj(s))));
-      title = `📝 <b>Відпрацювання · мої предмети (${esc(g.group)})</b>`;
-    } else {
-      list = items;
-    }
+    list = myConsultSlots(items, g);
+    if (g?.kind === "teacher") title = `📝 <b>Мої консультації</b> · 🎓 ${esc(g.teacher)}`;
+    else if (g) title = `📝 <b>Відпрацювання · мої викладачі (${esc(g.group)})</b>`;
   } else if (mode === "subs") {
     list = items.filter((c) => subSet.has(c.id));
     title = "🔔 <b>Мої нагадування про відпрацювання</b>";
@@ -293,7 +359,9 @@ function consultView(env, g, cons, mode, subs = [], query = "") {
       ],
       dayRow,
       ...subBtns,
-      [{ text: "🌐 Усі відпрацювання на сайті", url: siteConsultUrl }],
+      g
+        ? [{ text: "📅 Розклад", callback_data: "d:" + todayIso }, { text: "🌐 На сайті", url: siteConsultUrl }]
+        : [{ text: "🌐 Усі відпрацювання на сайті", url: siteConsultUrl }],
     ],
   };
   return [lines.join("\n"), kb];
@@ -346,17 +414,21 @@ function dayKb(env, g, iso, today = kyivISO()) {
   return { inline_keyboard: [
     weekChips(mondayOf(iso), iso, today),
     [{ text: "◀️", callback_data: "d:" + schoolDay(iso, -1) }, { text: iso === today ? "📅 Сьогодні" : "↩️ Сьогодні", callback_data: "d:" + today }, { text: "▶️", callback_data: "d:" + schoolDay(iso, 1) }],
-    [{ text: "🗓 Тиждень", callback_data: "w:" + mondayOf(iso) }, { text: "🔄 Заміни", callback_data: "changes" }, { text: "🌐 Сайт", url: siteLink(env, g) }],
+    [{ text: "🗓 Тиждень", callback_data: "w:" + mondayOf(iso) }, { text: "📝 Відпрац.", callback_data: "co:today" }],
+    [{ text: "🔄 Заміни", callback_data: "changes" }, { text: "🌐 Сайт", url: siteLink(env, g) }],
   ] };
 }
 function weekKb(env, g, monday, today = kyivISO()) {
   return { inline_keyboard: [
     weekChips(monday, null, today),
     [{ text: "◀️ Попередній", callback_data: "w:" + addDays(monday, -7) }, { text: "Наступний ▶️", callback_data: "w:" + addDays(monday, 7) }],
-    [{ text: "📅 Сьогодні", callback_data: "d:" + today }, { text: "🌐 Сайт", url: siteLink(env, g) }],
+    [{ text: "📅 Сьогодні", callback_data: "d:" + today }, { text: "📝 Відпрац.", callback_data: "co:today" }, { text: "🌐 Сайт", url: siteLink(env, g) }],
   ] };
 }
-const backKb = (env, g) => ({ inline_keyboard: [[{ text: "📅 Сьогодні", callback_data: "d:" + kyivISO() }, { text: "➡️ Завтра", callback_data: "d:" + schoolDay(kyivISO(), 1) }], [{ text: "🌐 Сайт", url: siteLink(env, g) }]] });
+const backKb = (env, g) => ({ inline_keyboard: [
+  [{ text: "📅 Сьогодні", callback_data: "d:" + kyivISO() }, { text: "➡️ Завтра", callback_data: "d:" + schoolDay(kyivISO(), 1) }],
+  [{ text: "📝 Відпрац.", callback_data: "co:today" }, { text: "🌐 Сайт", url: siteLink(env, g) }],
+] });
 const siteLink = (env, g) => (env.SITE_URL.endsWith("/") ? env.SITE_URL : env.SITE_URL + "/") + (g?.kind === "teacher" || String(g?.slug || "").startsWith("t-") ? "?t=" + encodeURIComponent(g.teacher || g.group) : "?g=" + encodeURIComponent(g.group));
 const toggle = (on, label, data) => ({ text: `${on ? "✅" : "▫️"} ${label}`, callback_data: data, ...(on ? { style: "success" } : {}) });
 function settingsText(u, g) {
@@ -438,6 +510,13 @@ function view(env, g, key, sg = 0) {
 // кнопка «Меню» біля поля вводу відкриває сайт розкладу своєї групи або викладача прямо в Telegram (Mini App)
 const setMenuButton = (env, chatId, g) => tg(env, "setChatMenuButton", { chat_id: chatId, menu_button: { type: "web_app", text: "Розклад", web_app: { url: siteLink(env, g) } } });
 
+async function ensureMenu(env, chatId, user) {
+  if (!(chatId > 0) || !user || (user.mv || 0) >= MENU_VER) return;
+  user.mv = MENU_VER;
+  await saveUser(env, chatId, user);
+  await send(env, chatId, "✨ Оновлено меню внизу — додано кнопку <b>«📝 Відпрацювання»</b>.", MENU, true);
+}
+
 async function showSettings(env, chatId, site, user, msg) {
   const g = findTarget(site.index, user.g);
   const data = g ? await groupJSON(env, site, g.slug).catch(() => null) : null;
@@ -452,6 +531,7 @@ async function chooseGroup(env, chatId, site, user, slugOrName, msg) {
   const keyVal = isT ? g.slug : g.name;
   const u = { ...DEFAULTS, ...(user || {}), g: keyVal };
   if (user && user.g !== keyVal) u.sg = 0; // нова група/режим — підгрупа скидається
+  if (chatId > 0) u.mv = MENU_VER;
   await saveUser(env, chatId, u);
   const data = await groupJSON(env, site, g.slug);
   if (chatId > 0) await setMenuButton(env, chatId, data);
@@ -544,7 +624,9 @@ async function onUpdate(env, upd) {
         subs = await saveConsultSubs(env, chatId, subs);
       }
       const [ct, ckb] = consultView(env, g, cons, mode, subs);
-      return edit(env, cb.message, ct, ckb);
+      await edit(env, cb.message, ct, ckb);
+      await ensureMenu(env, chatId, user);
+      return;
     }
     tg(env, "answerCallbackQuery", { callback_query_id: cb.id });
     if (d === "courses") return edit(env, cb.message, "Обери свій курс або режим викладача 👇", coursesKb(index));
@@ -567,12 +649,17 @@ async function onUpdate(env, upd) {
       else if (d === "s:sg") user.sg = (user.sg + 1) % 3;
       else if (d.startsWith("s:")) { const k = d.slice(2); if (["m", "e", "c", "w", "s"].includes(k)) user[k] = user[k] ? 0 : 1; }
       if (d !== "settings") await saveUser(env, chatId, user);
-      return showSettings(env, chatId, site, user, cb.message);
+      await showSettings(env, chatId, site, user, cb.message);
+      await ensureMenu(env, chatId, user);
+      return;
     }
     const g = await groupData(user);
     if (!g) return edit(env, cb.message, "Спершу обери групу 👇", coursesKb(index));
     const r = view(env, g, d, user.sg);
-    if (r) await edit(env, cb.message, r[0], r[1]);
+    if (r) {
+      await edit(env, cb.message, r[0], r[1]);
+      await ensureMenu(env, chatId, user);
+    }
     return;
   }
 
@@ -582,26 +669,36 @@ async function onUpdate(env, upd) {
     const payload = text.split(/\s+/)[1]; // t.me/<бот>?start=sob-11 або t-... — одразу обрати групу/викладача
     if (payload && (await chooseGroup(env, chatId, site, user, payload))) return;
     if (!user) return send(env, chatId, "Привіт! Я бот розкладу ПФК НЮУ 👋\nОбери курс або режим викладача 👇", coursesKb(index));
+    if (chatId > 0 && (user.mv || 0) < MENU_VER) { user.mv = MENU_VER; await saveUser(env, chatId, user); }
     await send(env, chatId, helpText(user, chatId, await groupData(user).catch(() => null)), MENU);
     return;
   }
-  if (key === "help") return send(env, chatId, helpText(user, chatId, await groupData(user).catch(() => null)), MENU);
+  if (key === "help") {
+    if (user && chatId > 0 && (user.mv || 0) < MENU_VER) { user.mv = MENU_VER; await saveUser(env, chatId, user); }
+    return send(env, chatId, helpText(user, chatId, await groupData(user).catch(() => null)), MENU);
+  }
   if (key === "group") return send(env, chatId, "Обери свій курс або режим викладача 👇", coursesKb(index));
   if (key === "teacher") return send(env, chatId, "🎓 Обери викладача (або просто напиши прізвище в чат) 👇", teachersKb(index, 0));
   if (key === "stop") { await env.USERS.delete("u:" + chatId); return send(env, chatId, "Готово, я більше не писатиму. Повернутися — /start", { remove_keyboard: true }); }
-  if (key === "settings") return user ? showSettings(env, chatId, site, user) : send(env, chatId, "Спершу обери групу або викладача 👇", coursesKb(index));
+  if (key === "settings") {
+    if (!user) return send(env, chatId, "Спершу обери групу або викладача 👇", coursesKb(index));
+    await showSettings(env, chatId, site, user);
+    return ensureMenu(env, chatId, user);
+  }
   if (key === "consult") {
     const cq = text.replace(/^\/\S+\s*/, "").trim();
     const isCmdQuery = text.startsWith("/consult") && cq.length >= 2;
     const [cons, g, subs] = await Promise.all([loadConsultations(env, site), groupData(user).catch(() => null), getConsultSubs(env, chatId)]);
     const [ct, ckb] = consultView(env, g, cons, isCmdQuery ? "q" : "today", subs, isCmdQuery ? cq : "");
-    return send(env, chatId, ct, ckb);
+    await send(env, chatId, ct, ckb);
+    return ensureMenu(env, chatId, user);
   }
   if (key) {
     const g = await groupData(user);
     if (!g) return send(env, chatId, "Спершу обери групу або викладача 👇", coursesKb(index));
     const [t, kb] = view(env, g, key, user.sg);
-    return send(env, chatId, t, kb);
+    await send(env, chatId, t, kb);
+    return ensureMenu(env, chatId, user);
   }
   // просто написали назву групи («соб-11») або прізвище викладача («Губанов»)
   if (findGroup(index, text) || findTeacher(index, text)) return chooseGroup(env, chatId, site, user, text);
@@ -615,12 +712,16 @@ async function onUpdate(env, upd) {
   if (norm(text).length >= 3) {
     const cons = await loadConsultations(env, site);
     if (searchConsultItems(cons.items || [], text).length) {
+      await ensureMenu(env, chatId, user);
       const [g, subs] = await Promise.all([groupData(user).catch(() => null), getConsultSubs(env, chatId)]);
       const [ct, ckb] = consultView(env, g, cons, "q", subs, text);
       return send(env, chatId, ct, ckb);
     }
   }
-  if (msg.chat.type === "private") return send(env, chatId, "Не зрозумів 🤔 Натисни кнопку внизу або напиши назву групи (напр. СОБ-11), прізвище чи предмет.", MENU);
+  if (msg.chat.type === "private") {
+    if (user && (user.mv || 0) < MENU_VER) { user.mv = MENU_VER; await saveUser(env, chatId, user); }
+    return send(env, chatId, "Не зрозумів 🤔 Натисни кнопку внизу або напиши назву групи (напр. СОБ-11), прізвище чи предмет.", MENU);
+  }
 }
 
 // ---------------------------------------------------------------- API для GitHub Actions
@@ -757,7 +858,7 @@ async function deliverChunk(env, batch, budget) {
       }
       const newId = r?.parameters?.migrate_to_chat_id;
       if (!r?.ok && newId) {
-        const meta = { g: u.g, m: bit(u.m), e: bit(u.e), c: bit(u.c), w: bit(u.w), s: bit(u.s), sg: +u.sg || 0, mh: +u.mh || DEFAULTS.mh, eh: +u.eh || DEFAULTS.eh };
+        const meta = { g: u.g, m: bit(u.m), e: bit(u.e), c: bit(u.c), w: bit(u.w), s: bit(u.s), sg: +u.sg || 0, mh: +u.mh || DEFAULTS.mh, eh: +u.eh || DEFAULTS.eh, ...(u.mv ? { mv: +u.mv } : {}) };
         if (!(await getUser(env, newId))) await saveUser(env, newId, meta);
         await env.USERS.delete("u:" + u.id);
         if (budget.left > 0) {

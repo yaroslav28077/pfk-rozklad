@@ -1,5 +1,5 @@
 /* Service worker: працює офлайн (останній завантажений розклад), дані й код інтерфейсу — спершу з мережі */
-const CACHE = "rozklad-v11";
+const CACHE = "rozklad-v12";
 const SHELL = [
   "./",
   "index.html",

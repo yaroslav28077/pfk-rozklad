@@ -613,34 +613,98 @@ test("воркер: консультації (/consult), пошук «Теорі
   assert.equal(savedRes.ddate1.suggested, "2026-12-10");
 });
 
+test("воркер: автооновлення MENU для давніх підписників, інлайн co:today та co:mine лише за викладачами групи", async () => {
+  const env = mkEnv();
+  const cons = {
+    updated: "2026-11-27T18:00",
+    sources: [],
+    items: [
+      { id: "t-noha-p-p:1:1410", teacher: "Нога П.П.", full_name: "Нога Петро Петрович", slug: "t-noha-p-p", day: "Понеділок", day_num: 1, start: "14:10", end: "15:30", subjects: ["Теорія права"] },
+      { id: "t-kryshtal-iu-v:2:1410", teacher: "Кришталь Ю.В.", full_name: "Кришталь Юлія Віталіївна", slug: "t-kryshtal-iu-v", day: "Вівторок", day_num: 2, start: "14:10", end: "16:00", subjects: ["Теорія права"] },
+    ],
+  };
+  const grp = {
+    group: "СОБ-11", course: 1, slug: "sob-11", changes: [],
+    days: { "2026-12-01": { items: [{ pair: 1, start: "08:00", end: "09:20", type: "Пр", subject: "Теорія права", teacher: "Кришталь Ю.В." }] } },
+  };
+  await api(env, "/api/state/set", {
+    key: "site:bundle",
+    value: { hash: "hm1", updated: "2026-11-27T18:00", index: INDEX, groups: { "sob-11": grp }, consultations: cons },
+    ttl: 86400,
+  });
+  // Старий підписник без mv
+  await env.USERS.put("u:55", "", { metadata: { g: "СОБ-11", m: 1, e: 1, c: 1, w: 1, s: 0, sg: 0, mh: 6, eh: 18 } });
+
+  // 1) Перше /today: надсилає розклад з інлайн-кнопкою co:today + тихе оновлення MENU з Відпрацювання (mv: 2)
+  calls = [];
+  let done;
+  await worker.fetch(new Request("https://w.test/", {
+    method: "POST",
+    headers: { "X-Telegram-Bot-Api-Secret-Token": SECRET },
+    body: JSON.stringify({ message: { chat: { id: 55, type: "private" }, text: "/today" } }),
+  }), env, { waitUntil: (p) => (done = p) });
+  await done;
+  const sends = tgSends();
+  assert.equal(sends.length, 2);
+  assert.ok(JSON.stringify(sends[0].body.reply_markup).includes('"co:today"'));
+  assert.ok(JSON.stringify(sends[1].body.reply_markup).includes("📝 Відпрацювання"));
+  assert.equal(sends[1].body.disable_notification, true);
+  assert.equal((await env.USERS.getWithMetadata("u:55")).metadata.mv, 2);
+
+  // 2) Наступний запит /today вже НЕ спамить оновленням меню
+  calls = [];
+  await worker.fetch(new Request("https://w.test/", {
+    method: "POST",
+    headers: { "X-Telegram-Bot-Api-Secret-Token": SECRET },
+    body: JSON.stringify({ message: { chat: { id: 55, type: "private" }, text: "/today" } }),
+  }), env, { waitUntil: (p) => (done = p) });
+  await done;
+  assert.equal(tgSends().length, 1);
+
+  // 3) co:mine показує Кришталь Ю.В. і виключає Ногу П.П. (чужий викладач того ж предмета)
+  calls = [];
+  await worker.fetch(new Request("https://w.test/", {
+    method: "POST",
+    headers: { "X-Telegram-Bot-Api-Secret-Token": SECRET },
+    body: JSON.stringify({ callback_query: { id: "cb_m", from: { id: 55 }, message: { chat: { id: 55 }, message_id: 12, text: "Відпр" }, data: "co:mine" } }),
+  }), env, { waitUntil: (p) => (done = p) });
+  await done;
+  const edited = calls.find((c) => c.url.endsWith("/editMessageText")).body.text;
+  assert.ok(edited.includes("Кришталь Ю.В.") && !edited.includes("Нога П.П."));
+});
+
 test("Mini App (docs/app.js): вкладка Відпрац. (вівторок 14:20 = 8 зараз), пошук Теорія права, вибір тижня та Сьогодні/Завтра", async () => {
   const vm = await import("node:vm");
   const { readFileSync } = await import("node:fs");
   const appSrc = readFileSync(new URL("../docs/app.js", import.meta.url), "utf8");
   const cons = JSON.parse(readFileSync(new URL("./golden/consultations.json", import.meta.url), "utf8"));
-  const idx = {
-    hash: "v8", short: "ПФК НЮУ", bot: "pfkrozkladBot", source_page: "https://nlu.edu.ua/", updated: "2026-12-01T14:20",
+  let curHash = "v8";
+  let curSubject2 = "Математика";
+  const idx = () => ({
+    hash: curHash, short: "ПФК НЮУ", bot: "pfkrozkladBot", source_page: "https://nlu.edu.ua/",
+    updated: curHash === "v8" ? "2026-12-01T14:20" : "2026-12-01T15:10",
     courses: { 1: [{ name: "ПД-14", slug: "pd-14", room: "305" }] },
     teachers: [{ name: "Нога П.П.", slug: "t-noha-p-p", degree: "", courses: [1, 3], subjects: ["Фінансове право"] }],
     pdfs: [],
-  };
-  const grpDoc = {
+  });
+  const grpDoc = () => ({
     group: "ПД-14", course: 1, slug: "pd-14", room: "305", changes: [],
     days: {
       "2026-12-01": { items: [
         { pair: 1, start: "08:00", end: "09:20", type: "Пр", subject: "Теорія права", teacher: "Кришталь Ю.В." },
-        { pair: 2, start: "09:30", end: "10:50", type: "Пр", subject: "Математика", teacher: "Харченко А.В." },
+        { pair: 2, start: "09:30", end: "10:50", type: "Пр", subject: curSubject2, teacher: "Харченко А.В." },
       ] },
       "2026-12-08": { items: [
-        { pair: 1, start: "08:00", end: "09:20", type: "Лк", subject: "Історія України", teacher: "Крайсвітня Ю.В." },
+        { pair: 1, start: "08:00", end: "09:20", type: "Лк", subject: "Історія України", teacher: "к.і.н. Крайсвітня Ю.В." },
       ] },
     },
-  };
+  });
 
-  // Фіксований час: вівторок 2026-12-01 14:20 за Києвом (12:20 UTC)
+  // Фіксований час: вівторок 2026-12-01 14:20 за Києвом (12:20 UTC), далі можна зсунути на неділю
+  let fakeNowMs = Date.parse("2026-12-01T12:20:00Z");
   const FixedDate = class extends Date {
-    constructor(...args) { super(...(args.length ? args : ["2026-12-01T12:20:00Z"])); }
-    static now() { return Date.parse("2026-12-01T12:20:00Z"); }
+    constructor(...args) { super(...(args.length ? args : [fakeNowMs])); }
+    static now() { return fakeNowMs; }
   };
   const els = new Map();
   const listeners = {};
@@ -652,9 +716,9 @@ test("Mini App (docs/app.js): вкладка Відпрац. (вівторок 1
     querySelectorAll: () => [],
     querySelector: () => null,
   });
-  for (const id of ["#view", "#title", "#subtitle", "#ics", "#banner", "#changes-dot", "#checked", "#src", "#brand-btn"]) els.set(id, mkEl(id));
+  for (const id of ["#view", "#title", "#subtitle", "#ics", "#banner", "#changes-dot", "#checked", "#src", "#brand-btn", "#sr-status"]) els.set(id, mkEl(id));
   const ctx = vm.createContext({
-    URL, URLSearchParams, Intl, Date: FixedDate, Set, Promise, Math, Object, Array, String, Number, Boolean, RegExp,
+    URL, URLSearchParams, Intl, Date: FixedDate, Set, Map, Promise, Math, Object, Array, String, Number, Boolean, RegExp, encodeURIComponent,
     location: { href: "https://site.test/?g=ПД-14#consult", pathname: "/", search: "?g=ПД-14", hash: "#consult" },
     history: { replaceState() {} },
     localStorage: { _m: {}, getItem(k) { return this._m[k] || null; }, setItem(k, v) { this._m[k] = v; } },
@@ -663,9 +727,9 @@ test("Mini App (docs/app.js): вкладка Відпрац. (вівторок 1
     document: { hidden: false, title: "", querySelector: (s) => els.get(s) || null, querySelectorAll: () => [], addEventListener() {} },
     setInterval: () => 0,
     fetch: async (url) => {
-      if (url.startsWith("data/index.json")) return { ok: true, json: async () => idx };
+      if (url.startsWith("data/index.json")) return { ok: true, json: async () => idx() };
       if (url.startsWith("data/consultations.json")) return { ok: true, json: async () => ({ items: cons, sources: [] }) };
-      if (url.startsWith("data/g/pd-14.json")) return { ok: true, json: async () => grpDoc };
+      if (url.startsWith("data/g/pd-14.json")) return { ok: true, json: async () => grpDoc() };
       throw new Error("unexpected fetch: " + url);
     },
   });
@@ -673,6 +737,22 @@ test("Mini App (docs/app.js): вкладка Відпрац. (вівторок 1
   await new Promise((r) => setTimeout(r, 20));
   const htmlConsult = els.get("#view").innerHTML;
   assert.ok(htmlConsult.includes("Консультують 8 викладачів"), "Expected 8 live teachers at Tue 14:20");
+  assert.ok(htmlConsult.includes("consult-live") && !htmlConsult.includes('class="hero'), "Should use compact live bar without hero");
+
+  // "Мої предмети": Кришталь Ю.В., Харченко А.В., Крайсвітня Ю.В. (з к.і.н.) є; чужі Нога П.П. та Овсяник С.А. відсутні
+  ctx.CONSULT_MODE = "mine";
+  ctx.render();
+  const htmlMine = els.get("#view").innerHTML;
+  assert.ok(htmlMine.includes("Кришталь Ю.В.") && htmlMine.includes("Харченко А.В.") && htmlMine.includes("Крайсвітня Ю.В."));
+  assert.ok(!htmlMine.includes("Нога П.П.") && !htmlMine.includes("Овсяник С.А."));
+  ctx.CONSULT_MODE = "today";
+
+  // У неділю (поза годинами консультацій) верхнього банера/hero немає взагалі
+  fakeNowMs = Date.parse("2026-12-06T10:00:00Z");
+  ctx.render();
+  const htmlSun = els.get("#view").innerHTML;
+  assert.ok(!htmlSun.includes("consult-live") && !htmlSun.includes('class="hero'));
+  fakeNowMs = Date.parse("2026-12-01T12:20:00Z");
 
   // Пошук "Теорія права" знаходить і Кришталь Ю.В., і Нога П.П.
   ctx.CONSULT_Q = "Теорія права";
@@ -691,8 +771,17 @@ test("Mini App (docs/app.js): вкладка Відпрац. (вівторок 1
   ctx.render();
   assert.ok(els.get("#view").innerHTML.includes("07.12–11.12") && els.get("#view").innerHTML.includes("Історія України"));
 
-  // Підказка консультації у картці пари студента
+  // Підказка консультації у картці пари студента (зокрема з к.і.н.)
+  assert.ok(els.get("#view").innerHTML.includes("Консультація: вт 14:10–15:00"));
   ctx.TAB = "today";
   ctx.render();
   assert.ok(els.get("#view").innerHTML.includes("Консультація: вт 14:10–16:00"));
+
+  // Автооновлення при зміні index.json.hash
+  curHash = "v9";
+  curSubject2 = "Вища математика";
+  const updated = await ctx.checkUpdates(true);
+  assert.equal(updated, true);
+  assert.ok(els.get("#view").innerHTML.includes("Вища математика"));
+  assert.ok(els.get("#checked").textContent.includes("15:10"));
 });

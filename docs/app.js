@@ -20,6 +20,79 @@ const plural = (n, one, few, many) => (n % 10 === 1 && n % 100 !== 11 ? one : n 
 const pluralPairs = (n) => plural(n, "пара", "пари", "пар");
 const pluralTeachers = (n) => plural(n, "викладач", "викладачі", "викладачів");
 const normSubj = (s) => String(s || "").toLowerCase().replace(/\([^)]*\)/g, " ").replace(/[«»"'’ʼ.,;]/g, " ").replace(/\s+/g, " ").trim();
+const normTeacher = (s) => String(s || "")
+  .trim()
+  .replace(/^(?:(?:(?:к|д)\.\s*[а-яіїєґ]+\.\s*н\.|д\.\s*ф\.|доц\.|проф\.|ст\.\s*викл\.|викл\.)[\s,]*)+/i, "")
+  .replace(/\s+/g, " ")
+  .replace(/\.+$/, "")
+  .toLowerCase();
+const surnameOf = (nt) => nt.split(/\s+/)[0] || "";
+function myConsultSlots(items, site) {
+  if (!items?.length) return [];
+  if (!site) return items;
+  if (site.kind === "teacher") return items.filter((c) => c.slug === site.slug);
+  const teacherSubjs = new Map();
+  const addFrom = (includeChanged) => {
+    for (const d of Object.values(site.days || {})) {
+      for (const it of d.items || []) {
+        if (it.cancelled || (!includeChanged && it.changed) || !it.teacher) continue;
+        const k = normTeacher(it.teacher);
+        if (!k) continue;
+        if (!teacherSubjs.has(k)) teacherSubjs.set(k, new Set());
+        if (it.subject) teacherSubjs.get(k).add(normSubj(it.subject));
+      }
+    }
+  };
+  addFrom(false);
+  if (!teacherSubjs.size) addFrom(true);
+  const bySurname = new Map();
+  for (const k of teacherSubjs.keys()) {
+    const sn = surnameOf(k);
+    if (sn.length >= 3) {
+      if (!bySurname.has(sn)) bySurname.set(sn, []);
+      bySurname.get(sn).push(k);
+    }
+  }
+  const consSlugsBySurname = new Map();
+  for (const c of items) {
+    for (const nm of [c.teacher, ...(c.aliases || [])]) {
+      const sn = surnameOf(normTeacher(nm));
+      if (sn.length >= 3) {
+        if (!consSlugsBySurname.has(sn)) consSlugsBySurname.set(sn, new Set());
+        consSlugsBySurname.get(sn).add(c.slug);
+      }
+    }
+  }
+  const matched = [];
+  for (const c of items) {
+    const names = [c.teacher, ...(c.aliases || [])].map(normTeacher).filter(Boolean);
+    let keys = names.filter((n) => teacherSubjs.has(n));
+    if (!keys.length) {
+      for (const n of names) {
+        const sn = surnameOf(n);
+        if (sn.length >= 3 && consSlugsBySurname.get(sn)?.size === 1 && bySurname.has(sn)) {
+          keys = bySurname.get(sn);
+          break;
+        }
+      }
+    }
+    if (keys.length) matched.push({ c, keys });
+  }
+  const bySlug = new Map();
+  for (const m of matched) {
+    if (!bySlug.has(m.c.slug)) bySlug.set(m.c.slug, []);
+    bySlug.get(m.c.slug).push(m);
+  }
+  const keepIds = new Set();
+  for (const arr of bySlug.values()) {
+    if (arr.length === 1) { keepIds.add(arr[0].c.id); continue; }
+    const subjs = new Set();
+    for (const m of arr) for (const k of m.keys) for (const s of teacherSubjs.get(k) || []) subjs.add(s);
+    const refined = arr.filter((m) => (m.c.subjects || []).some((s) => subjs.has(normSubj(s))));
+    for (const m of (refined.length ? refined : arr)) keepIds.add(m.c.id);
+  }
+  return items.filter((c) => keepIds.has(c.id));
+}
 
 /* ---------- іконки (у стилі Lucide, MIT) ---------- */
 const I = {
@@ -130,13 +203,14 @@ const live = (day) => (day.items || []).filter((i) => !i.cancelled);
 function consultSlotsForTeacher(nameOrSlug) {
   const items = (CONSULT && CONSULT.items) || [];
   if (!nameOrSlug || !items.length) return [];
-  const q = String(nameOrSlug).trim().toLowerCase();
-  const base = q.split(/\s+/)[0];
-  return items.filter((c) =>
-    c.slug === q || c.teacher.toLowerCase() === q
-    || (c.aliases || []).some((a) => a.toLowerCase() === q)
-    || (base.length >= 3 && (c.teacher.toLowerCase().startsWith(base + " ") || (c.aliases || []).some((a) => a.toLowerCase().startsWith(base + " "))))
-  );
+  const raw = String(nameOrSlug).trim().toLowerCase();
+  const q = normTeacher(nameOrSlug);
+  const base = surnameOf(q);
+  return items.filter((c) => {
+    const names = [c.teacher, ...(c.aliases || [])].map(normTeacher);
+    return c.slug === raw || names.includes(q)
+      || (base.length >= 3 && names.some((n) => n.startsWith(base + " ")));
+  });
 }
 function fmtConsultSummary(slots) {
   return slots.map((c) => `${SHORT[c.day_num].toLowerCase()} ${c.start}–${c.end}`).join(", ");
@@ -254,14 +328,6 @@ function teacherConsultCardHTML() {
   </button>`;
 }
 
-function groupSubjectsSet() {
-  const out = new Set();
-  for (const d of Object.values((SITE && SITE.days) || {})) {
-    for (const it of d.items || []) if (it.subject) out.add(normSubj(it.subject));
-  }
-  return out;
-}
-
 function consultHTML() {
   const items = (CONSULT && CONSULT.items) || [];
   if (!items.length) return `<div class="section-title"><h2>Відпрацювання</h2></div><div class="empty">${svg("clock")}Графік консультацій ще завантажується або поки недоступний.</div>`;
@@ -270,33 +336,17 @@ function consultHTML() {
   const nowSec = kn.sec;
   const liveNow = items.filter((c) => c.day_num === todayWd && toSec(c.start) <= nowSec && nowSec < toSec(c.end));
   const laterToday = items.filter((c) => c.day_num === todayWd && toSec(c.start) > nowSec).sort((a, b) => toSec(a.start) - toSec(b.start));
-  let hero = "";
+  let liveBar = "";
   if (liveNow.length) {
     const nextOne = laterToday[0];
     const maxEnd = liveNow.map((c) => c.end).sort().pop();
-    const meta = nextOne ? `Найближча далі: ${nextOne.teacher} о ${nextOne.start} — ${nextOne.subjects[0] || ""}` : `Тривають до ${maxEnd} · аудиторію уточнюйте у викладача`;
-    hero = `<section class="hero fade"><div class="label">Зараз · ${DAYS[todayWd]} ${kn.hm}</div>
-      <div class="big">Консультують ${liveNow.length} ${pluralTeachers(liveNow.length)}</div>
-      <div class="meta">${esc(meta)}</div></section>`;
-  } else {
-    const upcoming = [];
-    for (let offset = 0; offset < 7; offset++) {
-      const iso = addDays(kn.iso, offset);
-      const wd = dow(iso);
-      const cand = items.filter((c) => c.day_num === wd && (offset > 0 || toSec(c.start) > nowSec)).sort((a, b) => toSec(a.start) - toSec(b.start));
-      if (cand.length) { upcoming.push({ offset, iso, slot: cand[0] }); break; }
-    }
-    const nxt = upcoming[0];
-    const whenTxt = nxt ? `${nxt.offset === 0 ? "Сьогодні" : nxt.offset === 1 ? "Завтра" : DAYS[dow(nxt.iso)]} о ${nxt.slot.start}` : "Графік I семестру";
-    hero = `<section class="hero calm fade"><div class="label">Відпрацювання</div>
-      <div class="big">${nxt ? `${esc(whenTxt)} — ${esc(nxt.slot.teacher)}` : "Зараз консультацій немає"}</div>
-      <div class="meta">${nxt ? esc((nxt.slot.subjects || []).slice(0, 2).join(", ")) : "Усього викладачів у графіку: " + new Set(items.map((x) => x.slug)).size}</div></section>`;
+    const meta = nextOne ? `Далі: ${nextOne.teacher} о ${nextOne.start}` : `До ${maxEnd} · аудиторію уточнюйте у викладача`;
+    liveBar = `<div class="consult-live fade" role="status"><span class="chip live">● зараз</span><div class="cl-body"><b>Консультують ${liveNow.length} ${pluralTeachers(liveNow.length)}</b><small>${esc(meta)}</small></div></div>`;
   }
 
   const qRaw = CONSULT_Q.trim();
   const qNorm = normSubj(qRaw);
   const qLow = qRaw.toLowerCase();
-  const mineSet = groupSubjectsSet();
   let shown;
   if (qLow) {
     shown = items.filter((c) =>
@@ -308,9 +358,7 @@ function consultHTML() {
   } else if (CONSULT_MODE === "today") {
     shown = items.filter((c) => c.day_num === todayWd);
   } else if (CONSULT_MODE === "mine") {
-    shown = isTeacher()
-      ? items.filter((c) => c.slug === SITE.slug)
-      : items.filter((c) => (c.subjects || []).some((s) => mineSet.has(normSubj(s))));
+    shown = myConsultSlots(items, SITE);
   } else {
     shown = items;
   }
@@ -327,7 +375,7 @@ function consultHTML() {
     : CONSULT_MODE === "today"
       ? `<div class="section-title"><h2>${DAYS[todayWd] || "Сьогодні"}, ${ddmm(kn.iso)}</h2><span>${shown.length}</span></div>`
       : CONSULT_MODE === "mine"
-        ? `<div class="section-title"><h2>${isTeacher() ? "Мої консультації" : "Мої предмети (" + esc(SITE.group) + ")"}</h2><span>${shown.length}</span></div>`
+        ? `<div class="section-title"><h2>${isTeacher() ? "Мої консультації" : "Мої викладачі (" + esc(SITE.group) + ")"}</h2><span>${shown.length}</span></div>`
         : `<div class="section-title"><h2>Увесь тиждень</h2><span>${shown.length}</span></div>`;
 
   const cards = shown.length
@@ -353,7 +401,7 @@ function consultHTML() {
         `<a class="link-row" href="${esc(s.url)}" target="_blank" rel="noopener">${svg("file")}<div>${esc(s.title)}<small>nlu.edu.ua</small></div></a>`).join("")}</div>`
     : "";
 
-  return hero + search + seg + secTitle + cards + srcCard;
+  return liveBar + search + seg + secTitle + cards + srcCard;
 }
 
 /* ---------- вкладки ---------- */
@@ -528,7 +576,17 @@ function setupInstall() {
     else if (!ios) hint.textContent = "Меню браузера (⋮) → «Встановити застосунок» / «Додати на головний екран»";
   });
 }
-if ("serviceWorker" in navigator) window.addEventListener("load", () => navigator.serviceWorker.register("sw.js").catch(() => {}));
+let SW_REG = null;
+if ("serviceWorker" in navigator) {
+  const hadController = !!navigator.serviceWorker.controller;
+  let reloaded = false;
+  navigator.serviceWorker.addEventListener?.("controllerchange", () => {
+    if (hadController && !reloaded) { reloaded = true; location.reload(); }
+  });
+  window.addEventListener("load", () => {
+    navigator.serviceWorker.register("sw.js").then((reg) => { SW_REG = reg; }).catch(() => {});
+  });
+}
 
 /* ---------- таймер ---------- */
 function tick() {
@@ -590,6 +648,68 @@ function targetByNameOrSlug(name) {
   return t ? { ...t, kind: "teacher" } : null;
 }
 
+function syncSiteStatus() {
+  if (!SITE) return;
+  const today = kyivNow().iso;
+  const banner = $("#banner");
+  const weekDays = [0, 1, 2, 3, 4].map((i) => addDays(mondayOf(today), i));
+  if (banner) {
+    if (!weekDays.some((d) => SITE.days[d])) { banner.innerHTML = "Розклад на цей тиждень ще не опубліковано — щойно коледж його викладе, він з'явиться тут сам."; banner.hidden = false; }
+    else banner.hidden = true;
+  }
+  const dot = $("#changes-dot");
+  if (dot) dot.hidden = !SITE.changes.some((z) => z.date >= today);
+}
+
+function updateFooterMeta() {
+  if (!INDEX) return;
+  const ch = $("#checked");
+  if (ch) {
+    ch.textContent = INDEX.updated ? `Дані оновлено ${INDEX.updated.slice(8, 10)}.${INDEX.updated.slice(5, 7)} о ${INDEX.updated.slice(11, 16)}` : "";
+    const down = INDEX.source_down_since;
+    if (down) ch.textContent += ` · ⚠️ сайт коледжу недоступний з ${down.slice(8, 10)}.${down.slice(5, 7)} ${down.slice(11, 16)}, показано останній отриманий розклад`;
+  }
+  const src = $("#src");
+  if (src) src.href = INDEX.source_page;
+}
+
+let LAST_CHECK = 0;
+let CHECKING = false;
+async function checkUpdates(force = false) {
+  if (CHECKING || !INDEX || (!force && (document.hidden || Date.now() - LAST_CHECK < 60000))) return false;
+  CHECKING = true;
+  LAST_CHECK = Date.now();
+  try {
+    const r = await fetch("data/index.json?" + Date.now(), { cache: "no-store" });
+    if (!r.ok) return false;
+    const fresh = await r.json();
+    const hashChanged = Boolean(fresh.hash && fresh.hash !== INDEX.hash);
+    const metaChanged = fresh.updated !== INDEX.updated || fresh.source_down_since !== INDEX.source_down_since;
+    if (hashChanged || metaChanged) {
+      INDEX = fresh;
+      updateFooterMeta();
+    }
+    if (!hashChanged) return false;
+    const v = encodeURIComponent(fresh.hash);
+    const reqs = [
+      fetch(`data/consultations.json?${v}`, { cache: "no-store" }).then((x) => (x.ok ? x.json() : null)).catch(() => null),
+      SITE ? fetch(`data/${isTeacher() ? "t" : "g"}/${SITE.slug}.json?${v}`, { cache: "no-store" }).then((x) => (x.ok ? x.json() : null)).catch(() => null) : Promise.resolve(null),
+    ];
+    const [cons, grp] = await Promise.all(reqs);
+    if (cons) CONSULT = cons;
+    if (grp) SITE = grp;
+    syncSiteStatus();
+    const sr = $("#sr-status");
+    if (sr) sr.textContent = "Дані розкладу оновлено";
+    render();
+    return true;
+  } catch {
+    return false;
+  } finally {
+    CHECKING = false;
+  }
+}
+
 async function selectGroup(name) {
   const g = targetByNameOrSlug(name);
   if (!g) { TAB = "pick"; render(); return; }
@@ -619,12 +739,7 @@ async function selectGroup(name) {
     $("#subtitle").textContent = `${SITE.course} курс · ${INDEX.short || "ПФК НЮУ"}${SITE.room ? ` · ${SITE.room} ауд.` : ""}`;
   }
   $("#ics").href = `ics/${SITE.slug}.ics`;
-  const today = kyivNow().iso;
-  const banner = $("#banner");
-  const weekDays = [0, 1, 2, 3, 4].map((i) => addDays(mondayOf(today), i));
-  if (!weekDays.some((d) => SITE.days[d])) { banner.innerHTML = "Розклад на цей тиждень ще не опубліковано — щойно коледж його викладе, він з'явиться тут сам."; banner.hidden = false; }
-  else banner.hidden = true;
-  $("#changes-dot").hidden = !SITE.changes.some((z) => z.date >= today);
+  syncSiteStatus();
   if (TAB === "pick") TAB = "today";
   render();
 }
@@ -663,10 +778,7 @@ async function init() {
     $("#view").innerHTML = `<div class="empty">${svg("file")}Не вдалося завантажити дані. Перевір інтернет і онови сторінку.</div>`;
     return;
   }
-  $("#checked").textContent = INDEX.updated ? `Дані оновлено ${INDEX.updated.slice(8, 10)}.${INDEX.updated.slice(5, 7)} о ${INDEX.updated.slice(11, 16)}` : "";
-  const down = INDEX.source_down_since; // сайт коледжу не відповідає — показуємо останній отриманий розклад
-  if (down) $("#checked").textContent += ` · ⚠️ сайт коледжу недоступний з ${down.slice(8, 10)}.${down.slice(5, 7)} ${down.slice(11, 16)}, показано останній отриманий розклад`;
-  $("#src").href = INDEX.source_page;
+  updateFooterMeta();
   document.querySelectorAll(".tabbar button").forEach((b) => b.addEventListener("click", () => {
     if (!SITE) return;
     TAB = b.dataset.tab; history.replaceState(null, "", location.pathname + location.search + "#" + TAB); render(); window.scrollTo({ top: 0, behavior: "smooth" });
@@ -696,6 +808,13 @@ async function init() {
   if (wanted && targetByNameOrSlug(wanted)) await selectGroup(wanted);
   else { TAB = "pick"; $("#subtitle").textContent = INDEX.short || "ПФК НЮУ"; render(); }
   setInterval(() => SITE && tick(), 20000);
-  document.addEventListener("visibilitychange", () => { if (!document.hidden && SITE) render(); });
+  setInterval(() => { if (!document.hidden && SITE) checkUpdates(); }, 600000);
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden) {
+      if (SITE) render();
+      checkUpdates();
+      SW_REG?.update?.().catch(() => {});
+    }
+  });
 }
 init();
