@@ -5,7 +5,7 @@
  "kind": "schedule",
  "sha256": "ff04ae17dc4441b9e89bf0828cb1ca69e6a705bd23cf6dd91d0594ddaca4d35a",
  "first_seen": "2026-11-25T17:46+02:00",
- "updated": "2026-11-27T13:48+02:00",
+ "updated": "2026-11-27T14:14+02:00",
  "data": {
   "from": "2026-11-09",
   "to": "2026-11-27",
@@ -5109,5 +5109,5 @@
   ],
   "doubts": []
  },
- "parser": 2
+ "parser": 3
 }
