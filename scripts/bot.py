@@ -113,6 +113,62 @@ def ddmm_hm(iso):
 
 
 TR = dict(zip("абвгґдеєжзиіїйклмнопрстуфхцчшщьюя", "a b v h g d e ie zh z y i i i k l m n o p r s t u f kh ts ch sh shch  iu ia".split(" ")))
+UK_ORDER = {ch: i for i, ch in enumerate("АБВГҐДЕЄЖЗИІЇЙКЛМНОПРСТУФХЦЧШЩЬЮЯ")}
+TEACHER_ALIASES = {"ХАРЧНКО": "Харченко"}
+TEACHER_DEG_RE = re.compile(r"^\s*((?:(?:[а-яіїє]{1,4}\.){1,4}\s*)+)", re.I)
+TEACHER_NAME_RE = re.compile(r"^([А-ЯІЇЄҐ][а-яіїєґ'’ʼ\-]+),?\s+([А-ЯІЇЄҐ])\.\s*([А-ЯІЇЄҐ])\.?\s*$")
+
+
+def uk_sort_key(s):
+    return tuple((0, UK_ORDER[ch]) if ch in UK_ORDER else (1, ord(ch)) for ch in str(s or "").upper())
+
+
+def _lev1(a, b):
+    """True, якщо відстань Левенштейна між двома рядками <= 1."""
+    if a == b:
+        return True
+    la, lb = len(a), len(b)
+    if abs(la - lb) > 1:
+        return False
+    if la == lb:
+        return sum(x != y for x, y in zip(a, b)) <= 1
+    if la > lb:
+        a, b = b, a
+    i = j = diffs = 0
+    while i < len(a) and j < len(b):
+        if a[i] != b[j]:
+            diffs += 1
+            if diffs > 1:
+                return False
+            j += 1
+        else:
+            i += 1
+            j += 1
+    return True
+
+
+def parse_teacher_raw(raw):
+    """'к.п.н. Тараненко К.С.' / 'Бородай С.О' → (канонічне_ПІБ, ступінь, ключ)."""
+    s = " ".join(parse._apos(str(raw or "")).split()).strip(" ,;")
+    if not s:
+        return None
+    deg = ""
+    md = TEACHER_DEG_RE.match(s)
+    if md and md.end() < len(s):
+        rest = s[md.end():].strip()
+        if re.match(r"^[А-ЯІЇЄҐ]", rest):
+            deg = " ".join(md.group(1).split())
+            s = rest
+    m = TEACHER_NAME_RE.match(s)
+    if m:
+        sur, i1, i2 = m.group(1), m.group(2), m.group(3)
+        sur = TEACHER_ALIASES.get(sur.upper(), sur)
+        init = f"{i1}.{i2}."
+        return f"{sur} {init}", deg, (sur, init)
+    parts = s.split()
+    sur = TEACHER_ALIASES.get(parts[0].upper(), parts[0])
+    init = " ".join(parts[1:])
+    return f"{sur} {init}".strip(), deg, (sur, init)
 
 
 def slug(name):
@@ -452,6 +508,12 @@ def build(sources, resolutions=None):
             day = g["days"].setdefault(z["date"], {"items": [], "src": ""})
             same = [it for it in day["items"] if it["pair"] == z["pair"]]
             st, en = (same[0]["start"], same[0]["end"]) if same else BELLS.get(z["pair"], ("", ""))
+            was_subj = " / ".join(dict.fromkeys(it["subject"] for it in same)) if same else ""
+            was_teachers = list(dict.fromkeys(it["teacher"] for it in same if it.get("teacher")))
+            if was_subj:
+                z["was"] = was_subj
+            if was_teachers:
+                z["was_teachers"] = was_teachers
             if z["subject"].lower().strip() == "вікно":
                 for it in same:  # «вікно» там, де пари й так немає, — нічого не змінює
                     it["cancelled"] = True
@@ -460,8 +522,10 @@ def build(sources, resolutions=None):
                 new = {"pair": z["pair"], "start": st, "end": en, "subject": z["subject"], "teacher": z.get("teacher", ""),
                        "type": "Пр" if "практ" in kind else "Лк" if "лек" in kind else "", "changed": True,
                        "room": z.get("room") or (same[0].get("room", "") if same else g["room"])}
-                if same:
-                    new["was"] = " / ".join(dict.fromkeys(it["subject"] for it in same))
+                if was_subj:
+                    new["was"] = was_subj
+                if was_teachers:
+                    new["was_teachers"] = was_teachers
                 day["items"] = [it for it in day["items"] if it["pair"] != z["pair"]] + [new]
             day["items"].sort(key=lambda it: (it["pair"], it.get("subgroup", 0)))
         g["days"] = dict(sorted(g["days"].items()))
@@ -471,11 +535,238 @@ def build(sources, resolutions=None):
     return out, pdfs
 
 
-def write_site(out, pdfs, bot_name, status=None):
+def _canonical_teacher_map(out):
+    """Збирає відображення сирого ПІБ викладача → канонічне ім'я, ступінь, slug (із склеюванням одруків)."""
+    raw_names = []
+    for g in out.values():
+        for d in (g.get("days") or {}).values():
+            for it in d.get("items") or []:
+                if it.get("teacher"):
+                    raw_names.append(it["teacher"])
+                for wt in it.get("was_teachers") or []:
+                    raw_names.append(wt)
+        for z in g.get("changes") or []:
+            if z.get("teacher"):
+                raw_names.append(z["teacher"])
+            for wt in z.get("was_teachers") or []:
+                raw_names.append(wt)
+    parsed = {}
+    counts = {}
+    degrees = {}
+    for r in raw_names:
+        p = parse_teacher_raw(r)
+        if not p:
+            continue
+        name, deg, (sur, init) = p
+        parsed[r] = (name, deg, sur, init)
+        key = (sur.upper(), init.upper())
+        counts[key] = counts.get(key, 0) + 1
+        if deg:
+            degrees[key] = deg
+    canon_sur = {}
+    for (usur, uinit), cnt in counts.items():
+        if cnt <= 2 and len(usur) >= 5:
+            match = next((ms for (ms, mi), mc in sorted(counts.items(), key=lambda kv: -kv[1])
+                          if mi == uinit and mc >= 5 and ms != usur and _lev1(usur, ms)), None)
+            if match:
+                orig = next(p[2] for p in parsed.values() if p[2].upper() == match and p[3].upper() == uinit)
+                canon_sur[(usur, uinit)] = orig
+    res = {}
+    for r, (name, deg, sur, init) in parsed.items():
+        uk = (sur.upper(), init.upper())
+        target_sur = canon_sur.get(uk, sur)
+        cname = f"{target_sur} {init}".strip()
+        mkey = (target_sur.upper(), init.upper())
+        cdeg = degrees.get(mkey) or degrees.get(uk) or deg
+        res[r] = {"name": cname, "degree": cdeg, "slug": f"t-{slug(cname)}"}
+    return res
+
+
+def _format_groups_label(grps, out, course_sizes):
+    courses = {out[n]["course"] for n in grps if n in out}
+    if len(courses) == 1:
+        c = next(iter(courses))
+        if course_sizes.get(c, 0) >= 5 and len(grps) == course_sizes[c]:
+            return f"{c} курс ({len(grps)} груп)"
+    return ", ".join(grps)
+
+
+def build_teachers(out):
+    """Збирає розклади викладачів по всіх групах і замінах: t_slug → структура розкладу."""
+    if not out:
+        return {}
+    cmap = _canonical_teacher_map(out)
+    group_order = {n: i for i, n in enumerate(out)}
+    course_sizes = {}
+    for g in out.values():
+        course_sizes[g["course"]] = course_sizes.get(g["course"], 0) + 1
+    all_dates = sorted({iso for g in out.values() for iso in g.get("days", {})})
+    weekday_isos = [iso for iso in all_dates if date.fromisoformat(iso).weekday() < 5]
+
+    buckets = {}
+
+    def ensure_t(info):
+        ts = info["slug"]
+        if ts not in buckets:
+            buckets[ts] = {"info": info, "courses": set(), "subjects": set(), "slots": {}, "sat_dates": set(), "changes": {}}
+        return buckets[ts]
+
+    for gname, g in out.items():
+        c = g["course"]
+        for iso, day in (g.get("days") or {}).items():
+            wd = date.fromisoformat(iso).weekday()
+            for it in day.get("items") or []:
+                t_info = cmap.get(it.get("teacher") or "")
+                if t_info:
+                    tb = ensure_t(t_info)
+                    tb["courses"].add(c)
+                    tb["subjects"].add(it["subject"])
+                    if wd == 5:
+                        tb["sat_dates"].add(iso)
+                    skey = (iso, it["pair"], it.get("type", ""), it["subject"],
+                            bool(it.get("cancelled")), bool(it.get("changed")))
+                    slot = tb["slots"].setdefault(skey, {
+                        "pair": it["pair"], "start": it["start"], "end": it["end"],
+                        "type": it.get("type", ""), "subject": it["subject"],
+                        "groups": [], "rooms": [], "online": False, "stream": False,
+                        "choice": False, "changed": bool(it.get("changed")),
+                        "cancelled": bool(it.get("cancelled")), "cancel_notes": set(),
+                        "was": it.get("was", ""), "src": day.get("src", ""), "url": day.get("url", ""),
+                    })
+                    if gname not in slot["groups"]:
+                        slot["groups"].append(gname)
+                    rm = (it.get("room") or "").strip()
+                    if rm and rm != "потік" and rm not in slot["rooms"]:
+                        slot["rooms"].append(rm)
+                    slot["online"] = slot["online"] or bool(it.get("online"))
+                    slot["stream"] = slot["stream"] or bool(it.get("stream"))
+                    slot["choice"] = slot["choice"] or bool(it.get("choice"))
+                    if it.get("cancelled"):
+                        slot["cancel_notes"].add("вікно")
+                if it.get("changed") and it.get("was_teachers"):
+                    for wt in it["was_teachers"]:
+                        wt_info = cmap.get(wt)
+                        if not wt_info or (t_info and wt_info["slug"] == t_info["slug"]):
+                            continue
+                        wb = ensure_t(wt_info)
+                        wb["courses"].add(c)
+                        subj_w = it.get("was") or it["subject"]
+                        wb["subjects"].add(subj_w)
+                        skey = (iso, it["pair"], "", subj_w, True, True)
+                        slot = wb["slots"].setdefault(skey, {
+                            "pair": it["pair"], "start": it["start"], "end": it["end"],
+                            "type": "", "subject": subj_w,
+                            "groups": [], "rooms": [], "online": False, "stream": False,
+                            "choice": False, "changed": True, "cancelled": True,
+                            "cancel_notes": {f"заміна → {it['subject']}"}, "was": "",
+                            "src": day.get("src", ""), "url": day.get("url", ""),
+                        })
+                        if gname not in slot["groups"]:
+                            slot["groups"].append(gname)
+
+        for z in g.get("changes") or []:
+            t_info = cmap.get(z.get("teacher") or "")
+            if t_info:
+                tb = ensure_t(t_info)
+                ckey = (z["date"], z["pair"], z["subject"], "assigned")
+                cent = tb["changes"].setdefault(ckey, {
+                    "date": z["date"], "pair": z["pair"], "subject": z["subject"],
+                    "teacher": t_info["name"], "kind": z.get("kind", ""), "room": z.get("room", ""),
+                    "groups": [], "role": "assigned", "src": z.get("src", ""), "url": z.get("url", ""),
+                })
+                if gname not in cent["groups"]:
+                    cent["groups"].append(gname)
+            for wt in z.get("was_teachers") or []:
+                wt_info = cmap.get(wt)
+                if not wt_info or (t_info and wt_info["slug"] == t_info["slug"]):
+                    continue
+                wb = ensure_t(wt_info)
+                wsubj = z.get("was") or z["subject"]
+                ckey = (z["date"], z["pair"], wsubj, "removed")
+                cent = wb["changes"].setdefault(ckey, {
+                    "date": z["date"], "pair": z["pair"], "subject": wsubj,
+                    "teacher": wt_info["name"], "kind": z.get("kind", ""), "room": z.get("room", ""),
+                    "groups": [], "role": "removed",
+                    "to": "вікно" if z["subject"].lower().strip() == "вікно" else z["subject"],
+                    "src": z.get("src", ""), "url": z.get("url", ""),
+                })
+                if gname not in cent["groups"]:
+                    cent["groups"].append(gname)
+
+    teachers = {}
+    for ts, tb in sorted(buckets.items(), key=lambda kv: uk_sort_key(kv[1]["info"]["name"])):
+        info = tb["info"]
+        by_date_pair = {}
+        for skey, s in tb["slots"].items():
+            iso = skey[0]
+            by_date_pair.setdefault((iso, s["pair"]), []).append(s)
+        days = {}
+        target_dates = sorted(set(weekday_isos) | tb["sat_dates"])
+        for iso in target_dates:
+            day_items = []
+            day_urls = []
+            day_srcs = []
+            for pair_num in sorted({p for d_i, p in by_date_pair if d_i == iso}):
+                plist = by_date_pair[(iso, pair_num)]
+                if any(not x["cancelled"] for x in plist):
+                    plist = [x for x in plist if not x["cancelled"]]
+                for x in plist:
+                    grps = sorted(x["groups"], key=lambda n: group_order.get(n, 999))
+                    glabel = _format_groups_label(grps, out, course_sizes)
+                    room = ", ".join(x["rooms"]) if x["rooms"] else ("потік" if (x["stream"] or len(grps) > 1) else "")
+                    obj = {
+                        "pair": x["pair"], "start": x["start"], "end": x["end"],
+                        "type": x["type"], "subject": x["subject"],
+                        "groups": grps, "group_label": glabel, "room": room,
+                    }
+                    if x["online"]:
+                        obj["online"] = True
+                    if x["stream"] or len(grps) > 1:
+                        obj["stream"] = True
+                    if x["choice"]:
+                        obj["choice"] = True
+                    if x["changed"]:
+                        obj["changed"] = True
+                    if x["cancelled"]:
+                        obj["cancelled"] = True
+                        if x["cancel_notes"]:
+                            obj["cancel_note"] = "; ".join(sorted(x["cancel_notes"]))
+                    if x["was"]:
+                        obj["was"] = x["was"]
+                    day_items.append(obj)
+                    if x["url"] and x["url"] not in day_urls:
+                        day_urls.append(x["url"])
+                    if x["src"] and x["src"] not in day_srcs:
+                        day_srcs.append(x["src"])
+            days[iso] = {
+                "items": day_items,
+                "src": day_srcs[0] if day_srcs else "",
+                "url": day_urls[0] if day_urls else "",
+            }
+        chg_list = []
+        for cent in sorted(tb["changes"].values(), key=lambda x: (x["date"], x["pair"], x["subject"])):
+            grps = sorted(cent["groups"], key=lambda n: group_order.get(n, 999))
+            chg_list.append({**cent, "groups": grps, "group": _format_groups_label(grps, out, course_sizes)})
+        teachers[ts] = {
+            "kind": "teacher",
+            "group": info["name"],
+            "teacher": info["name"],
+            "degree": info["degree"],
+            "slug": ts,
+            "courses": sorted(tb["courses"]),
+            "subjects": sorted(tb["subjects"], key=uk_sort_key),
+            "days": days,
+            "changes": chg_list,
+        }
+    return teachers
+
+
+def write_site(out, pdfs, bot_name, status=None, teachers=None):
     """docs/data/* і docs/ics/*. Повертає хеш вмісту (щоб не деплоїти сайт без змін).
     status.source_down_since — з якого часу сайт коледжу недоступний (сайт покаже попередження)."""
-    gdir, idir = DOCS / "data" / "g", DOCS / "ics"
-    for d in (gdir, idir):
+    teachers = build_teachers(out) if teachers is None else teachers
+    gdir, tdir, idir = DOCS / "data" / "g", DOCS / "data" / "t", DOCS / "ics"
+    for d in (gdir, tdir, idir):
         d.mkdir(parents=True, exist_ok=True)
         for f in d.iterdir():
             f.unlink()
@@ -484,16 +775,25 @@ def write_site(out, pdfs, bot_name, status=None):
         courses.setdefault(str(g["course"]), []).append({"name": n, "slug": g["slug"], "room": g["room"]})
         jsave(gdir / f"{g['slug']}.json", g, compact=True)
         build_ics(g, idir / f"{g['slug']}.ics")
+    teachers_idx = []
+    for ts, t in teachers.items():
+        teachers_idx.append({
+            "name": t["teacher"], "slug": ts, "degree": t["degree"],
+            "courses": t["courses"], "subjects": t["subjects"][:4],
+        })
+        jsave(tdir / f"{ts}.json", t, compact=True)
+        build_ics(t, idir / f"{ts}.ics")
     index = {"college": CFG["college"], "short": CFG.get("short", ""), "bot": bot_name, "source_page": PAGE,
-             "bells": CFG["bells"], "courses": courses, "pdfs": pdfs,
+             "bells": CFG["bells"], "courses": courses, "teachers": teachers_idx, "pdfs": pdfs,
              "source_down_since": (status or {}).get("source_down_since")}
-    h = hashlib.sha256(json.dumps([index, out], ensure_ascii=False, sort_keys=True).encode()).hexdigest()[:16]
+    h = hashlib.sha256(json.dumps([index, out, teachers], ensure_ascii=False, sort_keys=True).encode()).hexdigest()[:16]
     index.update({"hash": h, "updated": now().isoformat(timespec="minutes")})
     jsave(DOCS / "data" / "index.json", index)
     return h
 
 
 def build_ics(g, target):
+    is_t = g.get("kind") == "teacher"
     stamp = now().astimezone(ZoneInfo("UTC")).strftime("%Y%m%dT%H%M%SZ")
     esc = lambda s: str(s or "").replace("\\", "\\\\").replace(";", "\\;").replace(",", "\\,").replace("\n", "\\n")  # noqa: E731
     out = ["BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//pfk-rozklad//UK", "CALSCALE:GREGORIAN", "METHOD:PUBLISH",
@@ -507,30 +807,43 @@ def build_ics(g, target):
         for it in day["items"]:
             if it.get("cancelled") or not it.get("start"):
                 continue
-            uid = hashlib.md5(f"{g['group']}{iso}{it['pair']}{it.get('subgroup', '')}{it['subject']}".encode()).hexdigest()
+            uid_key = f"{g['group']}{iso}{it['pair']}{it.get('group_label', '')}{it.get('subgroup', '')}{it['subject']}"
+            uid = hashlib.md5(uid_key.encode()).hexdigest()
             title = f"{(it.get('type', '') + ' ' + it['subject']).strip()}{' (заміна)' if it.get('changed') else ''}"
+            if is_t and it.get("group_label"):
+                title = f"{title} ({it['group_label']})"
+            desc = " · ".join(x for x in [f"Групи: {it['group_label']}" if is_t and it.get("group_label") else it.get("teacher", ""), str(it["pair"]) + " пара"] if x)
+            loc = "онлайн" if it.get("online") else (f"ауд. {it['room']}" if it.get("room") and str(it["room"]).isdigit() else it.get("room", ""))
             out += ["BEGIN:VEVENT", f"UID:{uid}@pfk-rozklad", f"DTSTAMP:{stamp}",
                     f"DTSTART;TZID=Europe/Kyiv:{d}T{it['start'].replace(':', '')}00",
                     f"DTEND;TZID=Europe/Kyiv:{d}T{it['end'].replace(':', '')}00",
-                    f"SUMMARY:{esc(title)}", f"LOCATION:{esc('онлайн' if it.get('online') else it.get('room', ''))}",
-                    f"DESCRIPTION:{esc(' · '.join(x for x in [it.get('teacher', ''), str(it['pair']) + ' пара'] if x))}", "END:VEVENT"]
+                    f"SUMMARY:{esc(title)}", f"LOCATION:{esc(loc)}",
+                    f"DESCRIPTION:{esc(desc)}", "END:VEVENT"]
     out.append("END:VCALENDAR")
     target.write_text("\r\n".join(out) + "\r\n", encoding="utf-8")
 
 
 # ---------------------------------------------------------------- тексти повідомлень
-def lesson_line(it):
+def lesson_line(it, is_teacher=False):
     n = NUM[it["pair"] - 1] if 0 < it["pair"] <= len(NUM) else f"{it['pair']}."
     if it.get("cancelled"):
-        return f"{n} <s>{escape(it.get('subject', ''))}</s> — <b>вікно</b>"
+        note = it.get("cancel_note") or "вікно"
+        grp = f" ({escape(it['group_label'])})" if is_teacher and it.get("group_label") else ""
+        return f"{n} <s>{escape(it.get('subject', ''))}{grp}</s> — <b>{escape(note)}</b>"
     t = (it.get("type", "") + " ").lstrip()
     extra = []
     if it.get("subgroup"):
         extra.append(f"{it['subgroup']} підгр.")
     elif it.get("choice"):
         extra.append("за вибором")
-    if it.get("teacher"):
+    if is_teacher and it.get("group_label"):
+        extra.append(f"👥 {escape(it['group_label'])}")
+    elif it.get("teacher"):
         extra.append(escape(it["teacher"]))
+    if it.get("room") and not it.get("online"):
+        rm = f"ауд. {it['room']}" if str(it["room"]).isdigit() else it["room"]
+        if rm != "потік":
+            extra.append(escape(rm))
     if it.get("online"):
         extra.append("онлайн")
     mark = " 🔄" if it.get("changed") else ""
@@ -543,16 +856,18 @@ def mine(items, sg=0):
 
 
 def fmt_day(g, d, title, sg=0):
-    head = f"📅 <b>{title}: {DAYN[d.weekday()]}, {d:%d.%m}</b> · {escape(g['group'])}"
+    is_t = g.get("kind") == "teacher"
+    who = f"🎓 {escape(g['teacher'])}" if is_t else escape(g["group"])
+    head = f"📅 <b>{title}: {DAYN[d.weekday()]}, {d:%d.%m}</b> · {who}"
     day = g["days"].get(d.isoformat())
     if day is not None:
-        day = {**day, "items": mine(day["items"], sg)}
+        day = {**day, "items": day["items"] if is_t else mine(day["items"], sg)}
     if day is None:
         return f"{head}\n😴 Вихідний" if d.weekday() >= 5 else f"{head}\n⚠️ Розклад на цю дату ще не опубліковано"
     live = [i for i in day["items"] if not i.get("cancelled")]
     if not live and not day["items"]:
         return f"{head}\nПар немає 🎉"
-    lines = [head, ""] + [lesson_line(it) for it in day["items"]]
+    lines = [head, ""] + [lesson_line(it, is_teacher=is_t) for it in day["items"]]
     if any(i.get("changed") or i.get("cancelled") for i in day["items"]):
         lines.append("\n🔄 — заміна з «Змін до розкладу»")
     if live:
@@ -566,7 +881,9 @@ def plural(n):
 
 
 def fmt_week(g, monday, sg=0):
-    lines = [f"🗓 <b>Тиждень {monday:%d.%m}–{monday + timedelta(days=4):%d.%m}</b> · {escape(g['group'])}"]
+    is_t = g.get("kind") == "teacher"
+    who = f"🎓 {escape(g['teacher'])}" if is_t else escape(g["group"])
+    lines = [f"🗓 <b>Тиждень {monday:%d.%m}–{monday + timedelta(days=4):%d.%m}</b> · {who}"]
     for i in range(6):
         d = monday + timedelta(days=i)
         day = g["days"].get(d.isoformat())
@@ -574,10 +891,16 @@ def fmt_week(g, monday, sg=0):
             if i < 5:
                 lines.append(f"<b>{SHORTD[i]} {d:%d.%m}</b>: ⚠️ ще не опубліковано")
             continue
-        live = [x for x in mine(day["items"], sg) if not x.get("cancelled")]
+        items = day["items"] if is_t else mine(day["items"], sg)
+        live = [x for x in items if not x.get("cancelled")]
         if not live:
             lines.append(f"<b>{SHORTD[i]} {d:%d.%m}</b>: пар немає 🎉"); continue
-        subj = "\n".join(f"  {x['pair']}. {escape(x['subject'])}{' 🔄' if x.get('changed') else ''}" for x in live)
+        subj = "\n".join(
+            f"  {x['pair']}. {escape(x['subject'])}"
+            + (f" ({escape(x['group_label'])})" if is_t and x.get("group_label") else "")
+            + (" 🔄" if x.get("changed") else "")
+            for x in live
+        )
         lines.append(f"<b>{SHORTD[i]} {d:%d.%m}</b> · {live[0]['start']}–{live[-1]['end']}\n{subj}")
     return "\n\n".join(lines)
 
@@ -698,7 +1021,8 @@ def broadcast(users, make_text, kb=None):
 def site_kb(g):
     if not SITE.startswith("http") or not g:
         return None
-    return {"inline_keyboard": [[{"text": "🌐 Сайт", "url": f"{SITE}?g={urllib.parse.quote(g['group'])}"},
+    q = f"t={urllib.parse.quote(g['teacher'])}" if g.get("kind") == "teacher" else f"g={urllib.parse.quote(g['group'])}"
+    return {"inline_keyboard": [[{"text": "🌐 Сайт", "url": f"{SITE}?{q}"},
                                  {"text": "📲 У календар", "url": f"{SITE}ics/{g['slug']}.ics"}]]}
 
 
@@ -754,7 +1078,7 @@ DEFAULT_ANNOUNCE = (
 )
 
 
-def notify(out, events, mode, only=None, stale_since=None, message=""):
+def notify(out, events, mode, only=None, stale_since=None, message="", teachers=None):
     """Розсилки. Повертає список технічних проблем (для звіту адміну)."""
     problems = []
     if not TOKEN:
@@ -773,9 +1097,17 @@ def notify(out, events, mode, only=None, stale_since=None, message=""):
     if only:  # тестовий запуск: лише вказані чати (якщо чат не підписаний — з default_group)
         byid = {str(u["id"]): u for u in users}
         test_users = [byid.get(str(c)) or {**DEFAULTS, "id": c, "g": CFG.get("default_group")} for c in only]
+    teachers = build_teachers(out) if teachers is None else teachers
+    by_slug = {g["slug"]: g for g in out.values()}
+    t_by_name = {t["teacher"]: t for t in teachers.values()}
+    cmap = _canonical_teacher_map(out) if out else {}
     t, h = today(), now().hour
     D = Delivery(w)
-    G = lambda u: out.get(u.get("g") or "")  # noqa: E731
+
+    def G(u):
+        val = u.get("g") or ""
+        return out.get(val) or by_slug.get(val) or teachers.get(val) or t_by_name.get(val)
+
     kb = lambda u: site_kb(G(u))  # noqa: E731
     on = lambda u, k: int(u.get(k, 1) or 0)  # noqa: E731
     sg = lambda u: int(u.get("sg") or 0)  # noqa: E731
@@ -803,6 +1135,8 @@ def notify(out, events, mode, only=None, stale_since=None, message=""):
         g = G(u)
         if not g or not on(u, "m") or t.isoformat() not in g["days"]:
             return None
+        if g.get("kind") == "teacher" and not [x for x in g["days"][t.isoformat()]["items"] if not x.get("cancelled") or x.get("changed")]:
+            return None
         return fmt_day(g, t, "Сьогодні", sg(u)) + note
 
     tm = t + timedelta(days=1)
@@ -812,12 +1146,16 @@ def notify(out, events, mode, only=None, stale_since=None, message=""):
         g = G(u)
         if not g:
             return None
+        is_t = g.get("kind") == "teacher"
         if t.weekday() == 6:  # неділя — огляд наступного тижня, якщо його вже опубліковано
-            if on(u, "w") and any((next_mon + timedelta(days=i)).isoformat() in g["days"] for i in range(6)):
+            days_ok = [g["days"].get((next_mon + timedelta(days=i)).isoformat()) for i in range(6)]
+            if on(u, "w") and (any((d or {}).get("items") for d in days_ok) if is_t else any(d is not None for d in days_ok)):
                 return fmt_week(g, next_mon, sg(u)) + note
             if on(u, "w"):
                 return None
         if t.weekday() != 5 and on(u, "e") and tm.isoformat() in g["days"]:
+            if is_t and not [x for x in g["days"][tm.isoformat()]["items"] if not x.get("cancelled") or x.get("changed")]:
+                return None
             return fmt_day(g, tm, "Завтра", sg(u)) + note
         return None
 
@@ -833,10 +1171,38 @@ def notify(out, events, mode, only=None, stale_since=None, message=""):
         if e["type"] == "changes":
             targets = [(z, set(parse.change_targets(z["group"], glist))) for z in e["rows"]]
 
+            def _t_rows(t_slug):
+                out_rows = []
+                for z, gs in targets:
+                    assign_t = (cmap.get(z.get("teacher") or "") or {}).get("slug")
+                    if assign_t == t_slug:
+                        out_rows.append((z, "assigned", sorted(gs)))
+                        continue
+                    for gn in sorted(gs):
+                        for gc in out.get(gn, {}).get("changes") or []:
+                            if gc["date"] == z["date"] and gc["pair"] == z["pair"] and gc["subject"] == z["subject"]:
+                                if any((cmap.get(wt) or {}).get("slug") == t_slug for wt in gc.get("was_teachers") or []):
+                                    out_rows.append((gc, "removed", [gn]))
+                return out_rows
+
             def txt(u, targets=targets):
                 g = G(u)
                 if not g or not on(u, "c"):
                     return None
+                if g.get("kind") == "teacher":
+                    t_rows = _t_rows(g["slug"])
+                    if not t_rows:
+                        return None
+                    lines = []
+                    for z, role, gs in t_rows:
+                        d_s = f"{date.fromisoformat(z['date']):%d.%m} ({SHORTD[date.fromisoformat(z['date']).weekday()]})"
+                        grp_s = ", ".join(gs) if gs else z["group"]
+                        if role == "removed":
+                            to_s = "<b>вікно</b>" if z["subject"].lower() == "вікно" else f"заміна → {escape(z['subject'])}"
+                            lines.append(f"• {d_s}, {z['pair']} пара · {escape(grp_s)}: <s>{escape(z.get('was') or '')}</s> — {to_s}")
+                        else:
+                            lines.append(f"• {d_s}, {z['pair']} пара · {escape(grp_s)}: <b>{escape(z['subject'])}</b>")
+                    return f"🔔 <b>Нові заміни</b> · 🎓 {escape(g['teacher'])}\n\n" + "\n".join(lines)
                 mine_rows = [z for z, gs in targets if g["group"] in gs]
                 if not mine_rows:
                     return None
@@ -849,9 +1215,23 @@ def notify(out, events, mode, only=None, stale_since=None, message=""):
             d0 = date.fromisoformat(e["from"])
             mon = d0 - timedelta(days=d0.weekday())
             word = "Оновлено розклад" if e.get("changed") else "Новий розклад"
-            D.run("ev:" + e["key"], users, lambda u, e=e, mon=mon, word=word: G(u) and G(u)["course"] == e["course"] and on(u, "c")
-                  and f"🆕 <b>{word}</b> ({date.fromisoformat(e['from']):%d.%m}–{date.fromisoformat(e['to']):%d.%m})\n\n" + fmt_week(G(u), mon, sg(u)),
-                  kb, ttl=14 * 86400)
+
+            def sched_txt(u, e=e, mon=mon, word=word):
+                g = G(u)
+                if not g or not on(u, "c"):
+                    return None
+                if g.get("kind") == "teacher":
+                    if e["course"] not in g.get("courses", []):
+                        return None
+                    has_any = any(g["days"].get(iso, {}).get("items") for iso in g["days"] if e["from"] <= iso <= e["to"])
+                    if not has_any:
+                        return None
+                    return f"🆕 <b>{word} ({e['course']} курс</b>, {date.fromisoformat(e['from']):%d.%m}–{date.fromisoformat(e['to']):%d.%m})\n\n" + fmt_week(g, mon, sg(u))
+                if g["course"] != e["course"]:
+                    return None
+                return f"🆕 <b>{word}</b> ({date.fromisoformat(e['from']):%d.%m}–{date.fromisoformat(e['to']):%d.%m})\n\n" + fmt_week(g, mon, sg(u))
+
+            D.run("ev:" + e["key"], users, sched_txt, kb, ttl=14 * 86400)
     tot = D.total
     if w.url and tot["gone"]:
         w.call("/api/drop", {"ids": tot["gone"]})
@@ -1001,10 +1381,11 @@ def ensure_webhook():
     log(f"Вебхук → {WORKER_URL}: {'ok' if r.get('ok') else r.get('description')}")
 
 
-def sync_worker_site(index, out):
-    """Дублює зібраний розклад у KV воркера (1 ключ), щоб бот працював навіть під час збоїв GitHub Pages."""
+def sync_worker_site(index, out, teachers=None):
+    """Дублює зібраний розклад (групи й викладачі) у KV воркера (1 ключ), щоб бот працював під час збоїв GitHub Pages."""
     if not index or not out:
         return
+    teachers = build_teachers(out) if teachers is None else teachers
     w = Worker()
     if not w.url:
         return
@@ -1014,7 +1395,7 @@ def sync_worker_site(index, out):
     if isinstance(cur, dict) and cur.get("hash") == index.get("hash"):
         return
     bundle = {"hash": index["hash"], "updated": index["updated"], "index": index,
-              "groups": {g["slug"]: g for g in out.values()}}
+              "groups": {**{g["slug"]: g for g in out.values()}, **teachers}}
     if w.put("site:bundle", bundle, 30 * 86400):
         log("Розклад синхронізовано з KV воркера")
 
@@ -1031,11 +1412,12 @@ def setup_bot():
         {"command": "week", "description": "Розклад на тиждень"},
         {"command": "changes", "description": "Заміни"},
         {"command": "group", "description": "Обрати / змінити групу"},
+        {"command": "teacher", "description": "Розклад викладача"},
         {"command": "settings", "description": "Сповіщення"},
         {"command": "help", "description": "Допомога"}]})
-    tg("setMyDescription", {"description": f"Розклад усіх груп {CFG.get('short', '')}: пари на сьогодні й завтра, тиждень, заміни. "
-                                           "Натисни «Почати» й обери свою групу. Дані — з nlu.edu.ua."})
-    tg("setMyShortDescription", {"short_description": f"Розклад і заміни всіх груп · {CFG.get('short', '')}"})
+    tg("setMyDescription", {"description": f"Розклад усіх груп і викладачів {CFG.get('short', '')}: пари на сьогодні й завтра, тиждень, заміни. "
+                                           "Натисни «Почати» й обери свою групу або викладача. Дані — з nlu.edu.ua."})
+    tg("setMyShortDescription", {"short_description": f"Розклад і заміни (групи й викладачі) · {CFG.get('short', '')}"})
     if SITE.startswith("https://"):  # кнопка «Розклад» біля поля вводу — сайт як Mini App
         tg("setChatMenuButton", {"menu_button": {"type": "web_app", "text": "Розклад", "web_app": {"url": SITE}}})
     return me.get("username", "")
@@ -1084,6 +1466,7 @@ def cmd_update(a):
     resolutions = sync_resolutions()
     problems += collect_unresolved_doubts(sources, resolutions, sync_kv=True)
     out, pdfs = build(sources, resolutions)
+    teachers = build_teachers(out) if out else {}
     status = {"source_down_since": issue_since("site", problems)}
     if not out:  # нічого не розібралося — не затираємо робочий сайт порожнім
         problems.append({"id": "empty", "text": "Після розбору не лишилося жодної групи — сайт не оновлено", "url": PAGE})
@@ -1092,9 +1475,9 @@ def cmd_update(a):
         if TOKEN:
             ensure_webhook()
         bot_name = setup_bot() if TOKEN else ""
-        h = write_site(out, pdfs, bot_name, status)
+        h = write_site(out, pdfs, bot_name, status, teachers)
         if TOKEN:
-            sync_worker_site(jload(DOCS / "data" / "index.json", None), out)
+            sync_worker_site(jload(DOCS / "data" / "index.json", None), out, teachers)
         changed = h != deployed_hash()
     deploy = bool(out) and (changed or a.mode != "auto")
     tech_problems = [p for p in problems if not p["id"].startswith("doubt:")]
@@ -1102,7 +1485,7 @@ def cmd_update(a):
              "stale_since": status["source_down_since"]}
     jsave(state_file(a), state)
     gh_output(deploy="true" if deploy else "false", degraded="true" if tech_problems else "false")
-    log(f"Груп: {len(out)}, PDF: {len(pdfs)}, подій: {len(events)}, проблем: {len(tech_problems)}, сумнівів: {len(problems) - len(tech_problems)}, сайт {'змінився' if changed else 'без змін'}")
+    log(f"Груп: {len(out)}, викл.: {len(teachers)}, PDF: {len(pdfs)}, подій: {len(events)}, проблем: {len(tech_problems)}, сумнівів: {len(problems) - len(tech_problems)}, сайт {'змінився' if changed else 'без змін'}")
     for p in tech_problems:
         log(f"::error::{p['text']}")
     return state
@@ -1113,12 +1496,13 @@ def cmd_notify(a, state=None):
     if state is None:
         sys.exit("Немає файла стану від `update` — спершу запусти update")
     out, _ = build(load_sources())
+    teachers = build_teachers(out) if out else {}
     if state.get("events") and state.get("deploy") and os.environ.get("PAGES_DEPLOYED") == "success" and state.get("hash"):
         wait_deployed(state["hash"])
     only = [c.strip() for c in (a.only or "").split(",") if c.strip()]
     msg = getattr(a, "message", "") or os.environ.get("ANNOUNCE_MESSAGE", "")
     problems = list(state.get("problems") or [])
-    problems += notify(out, state.get("events") or [], a.mode, only=only, stale_since=state.get("stale_since"), message=msg)
+    problems += notify(out, state.get("events") or [], a.mode, only=only, stale_since=state.get("stale_since"), message=msg, teachers=teachers)
     report(problems, state.get("unchecked") or [])
     tech_problems = [p for p in problems if not p["id"].startswith("doubt:")]
     heartbeat(tech_problems)
@@ -1155,9 +1539,14 @@ def cmd_show(a):
     for rec in sources.values():
         rec["on_page"] = True
     out, _ = build(sources)
-    g = out.get(a.group) or next((v for k, v in out.items() if parse._norm(k) == parse._norm(a.group)), None)
+    teachers = build_teachers(out) if out else {}
+    nq = parse._norm(a.group)
+    g = (out.get(a.group)
+         or next((v for k, v in out.items() if parse._norm(k) == nq), None)
+         or teachers.get(a.group)
+         or next((v for v in teachers.values() if parse._norm(v["teacher"]) == nq or nq in parse._norm(v["teacher"])), None))
     if not g:
-        sys.exit(f"Групу не знайдено. Є: {', '.join(sorted(out))}")
+        sys.exit(f"Не знайдено. Групи: {', '.join(sorted(out))}")
     d = date.fromisoformat(a.date) if a.date else today()
     print(re.sub(r"<[^>]+>", "", fmt_day(g, d, "День")))
 
