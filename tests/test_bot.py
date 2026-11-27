@@ -154,7 +154,8 @@ class World:
         """data/sources як зараз у репозиторії + ті самі PDF на сайті коледжу (sha збігається)."""
         for k, rec in REAL.items():
             raw = self.publish(k, rec["data"], title=rec["title"])
-            rec = {**copy.deepcopy(rec), "sha256": hashlib.sha256(raw).hexdigest(), "url": self.url_of(k)}
+            rec = {**copy.deepcopy(rec), "sha256": hashlib.sha256(raw).hexdigest(),
+                   "url": self.url_of(k), "parser": bot.parse.VERSION}
             bot.jsave(bot.SRC / f"{k}.json", rec)
 
     def http(self, url, data=None, headers=None, timeout=60, tries=None):
@@ -620,3 +621,44 @@ def test_bot_skips_slot_while_worker_batch_is_pending(w):
     w.clock = kyiv(2026, 11, 3, 6, 20)
     w.run()
     assert w.to("a") == [] and w.to("b") == []
+
+
+def test_reparse_on_parser_version_and_admin_doubt_resolution(w):
+    w.seed_real()
+    old_rec = json.loads((bot.SRC / f"{C1}.json").read_text(encoding="utf-8"))
+    old_rec["parser"] = 0
+    bot.jsave(bot.SRC / f"{C1}.json", old_rec)
+    reparsed_data = copy.deepcopy(REAL[C1]["data"])
+    did = "abc1234567"
+    target_grp = next(it["group"] for it in reparsed_data["items"] if it["date"] == "2026-11-03")
+    reparsed_data["items"] = [
+        it for it in reparsed_data["items"]
+        if not (it["group"] == target_grp and it["date"] == "2026-11-03" and it["pair"] == 1)
+    ] + [
+        {"group": target_grp, "date": "2026-11-03", "pair": 1, "start": "08:00", "end": "09:20",
+         "type": "Лк", "subject": "Перший варіант", "teacher": "Іванов І.І.", "doubt": did},
+        {"group": target_grp, "date": "2026-11-03", "pair": 1, "start": "08:00", "end": "09:20",
+         "type": "Пр", "subject": "Другий варіант", "teacher": "Петров П.П.", "doubt": did},
+    ]
+    reparsed_data["doubts"] = [{
+        "id": did, "kind": "conflict", "pair": 1, "start": "08:00",
+        "groups": [target_grp], "dates": ["2026-11-03"],
+        "options": [{"type": "Лк", "subject": "Перший варіант", "teacher": "Іванов І.І."},
+                    {"type": "Пр", "subject": "Другий варіант", "teacher": "Петров П.П."}],
+    }]
+    w.meaning[w.pdfs[C1]] = reparsed_data
+    w.worker.users = {"1": user(1, target_grp, c=1)}
+    w.clock = kyiv(2026, 11, 3, 15)
+    _, problems = w.run()
+    assert any(p["id"] == f"doubt:{did}" for p in problems)
+    assert any("Сумнівне місце у PDF" in t for t in w.to(900))
+    assert f"doubt:{did}" in w.worker.kv
+
+    # Адмін відповів через воркера → рішення підтягується і питання закривається
+    w.worker.kv["resolutions"] = {did: {"keep": ["Другий варіант"], "by": "900", "at": "2026-11-03T15:05:00+02:00"}}
+    w.clock = kyiv(2026, 11, 3, 16)
+    _, problems2 = w.run()
+    assert not any(p["id"] == f"doubt:{did}" for p in problems2)
+    assert any("Питання щодо розкладу закрито" in t for t in w.to(900))
+    res_file = json.loads(bot.resolutions_path().read_text(encoding="utf-8"))
+    assert res_file[did]["keep"] == ["Другий варіант"]

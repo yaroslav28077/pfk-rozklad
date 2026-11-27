@@ -350,3 +350,53 @@ test("cron воркера: обробка 403, migrate_to_chat_id, 502 і 429 б
     globalThis.fetch = origFetch;
   }
 });
+
+test("callback rs: зберігає відповідь адміна в KV, відхиляє чужих і тригерить dispatch", async () => {
+  const env = mkEnv({ GH_DISPATCH_TOKEN: "ghp_x", GITHUB_REPO: "o/r", TELEGRAM_CHAT_ID: "900" });
+  await api(env, "/api/heartbeat", { admins: ["900"], repo: "o/r" });
+  await api(env, "/api/state/set", {
+    key: "doubt:d123",
+    value: {
+      id: "d123",
+      course: 3,
+      pair: 3,
+      groups: ["ПК-32-А"],
+      options: [
+        { type: "Лк", subject: "Основи національного спротиву", teacher: "Бородай С.О." },
+        { type: "Пр", subject: "Криміналістичні експертизи", teacher: "Мороз С.Г." },
+      ],
+    },
+    ttl: 86400,
+  });
+
+  calls = [];
+  let done;
+  // Не адмін — заборонено
+  await worker.fetch(new Request("https://w.test/", {
+    method: "POST",
+    headers: { "X-Telegram-Bot-Api-Secret-Token": SECRET },
+    body: JSON.stringify({
+      callback_query: { id: "cb1", from: { id: 123 }, message: { chat: { id: 123 }, message_id: 1, text: "Питання" }, data: "rs:d123:1" },
+    }),
+  }), env, { waitUntil: (p) => (done = p) });
+  await done;
+  assert.equal(await env.USERS.get("s:resolutions", "json"), null);
+  assert.ok(calls.some((c) => c.url.endsWith("/answerCallbackQuery") && c.body.show_alert === true));
+
+  // Адмін натиснув кнопку 2 (індекс 1)
+  calls = [];
+  await worker.fetch(new Request("https://w.test/", {
+    method: "POST",
+    headers: { "X-Telegram-Bot-Api-Secret-Token": SECRET },
+    body: JSON.stringify({
+      callback_query: { id: "cb2", from: { id: 900 }, message: { chat: { id: 900 }, message_id: 2, text: "Питання щодо PDF" }, data: "rs:d123:1" },
+    }),
+  }), env, { waitUntil: (p) => (done = p) });
+  await done;
+  const saved = await env.USERS.get("s:resolutions", "json");
+  assert.deepEqual(saved.d123.keep, ["Криміналістичні експертизи"]);
+  assert.equal(saved.d123.by, "900");
+  assert.ok(calls.some((c) => c.url.endsWith("/answerCallbackQuery") && c.body.text === "Прийнято"));
+  assert.ok(calls.some((c) => c.url.endsWith("/editMessageText") && /Прийнято/.test(c.body.text)));
+  assert.ok(calls.some((c) => c.url.includes("/dispatches")));
+});

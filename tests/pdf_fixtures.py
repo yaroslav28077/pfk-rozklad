@@ -63,3 +63,46 @@ def changes_pdf():
         (["", "3", "ПД-11", "вікно", ""], set()),
     ], top=60)
     return doc.tobytes()
+
+
+def split_cell_schedule_pdf():
+    """Поділена клітинка без горизонтальної лінії: лекція зверху на 3 стовпці, дві окремі пари знизу."""
+    doc = pymupdf.open()
+    page = doc.new_page(width=595, height=842)
+    page.insert_font(fontname="dv", fontfile=FONT)
+    page.insert_text((40, 40), "РОЗКЛАД ЗАНЯТЬ 3 курсу з 09.11.2026 по 13.11.2026", fontname="dv", fontsize=10)
+    xs = [40, 70, 145, 295, 445, 575]
+    # Шапка + Понеділок (звичайні рядки)
+    y = 60
+    page.draw_line((xs[0], y), (xs[-1], y), width=0.8)
+    for cells_row, merged, rh in [
+        (["№", "Час", "ПК-31-А", "ПК-32-А", "ПК-33-А"], set(), 24),
+        (["", "", "ауд. 101", "ауд. 102", "ауд. 103"], set(), 20),
+        (["ПОНЕДІЛОК"], {1, 2, 3, 4}, 20),
+    ]:
+        for j, x in enumerate(xs):
+            if j not in merged:
+                page.draw_line((x, y), (x, y + rh), width=0.8)
+        page.draw_line((xs[0], y + rh), (xs[-1], y + rh), width=0.8)
+        col = 0
+        for txt in cells_row:
+            while col in merged:
+                col += 1
+            if txt:
+                page.insert_text((xs[col] + 3, y + 14), txt, fontname="dv", fontsize=7)
+            col += 1
+        y += rh
+    # Поділений рядок висотою 44pt (без горизонтальної лінії всередині!)
+    rh = 44
+    for j in (0, 1, 2, 5):
+        page.draw_line((xs[j], y), (xs[j], y + rh), width=0.8)
+    # Лише нижня половина має вертикальні розділювачі 3 і 4 (~50% висоти)
+    for j in (3, 4):
+        page.draw_line((xs[j], y + 22), (xs[j], y + rh), width=0.8)
+    page.draw_line((xs[0], y + rh), (xs[-1], y + rh), width=0.8)
+    page.insert_text((xs[0] + 3, y + 24), "3", fontname="dv", fontsize=7)
+    page.insert_text((xs[1] + 3, y + 24), "11:00-12:15", fontname="dv", fontsize=7)
+    page.insert_text((xs[2] + 60, y + 14), "Лк. Основи національного спротиву, Бородай С.О. 09.11", fontname="dv", fontsize=7)
+    page.insert_text((xs[3] + 3, y + 36), "Пр. Криміналістика, Мороз С.Г. 09.11", fontname="dv", fontsize=7)
+    page.insert_text((xs[4] + 3, y + 36), "Пр. Право, Нога П.П. 09.11", fontname="dv", fontsize=7)
+    return doc.tobytes()
