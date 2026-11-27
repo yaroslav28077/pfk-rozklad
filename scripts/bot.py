@@ -215,6 +215,17 @@ def parse_pdf(kind, pdf, title, old_data=None):
     return d
 
 
+def _strip_doubt(it):
+    return {k: v for k, v in it.items() if k != "doubt"}
+
+
+def _items_signature(data):
+    if not isinstance(data, dict):
+        return data
+    return {k: ([_strip_doubt(it) for it in v] if k == "items" else v)
+            for k, v in data.items() if k not in ("doubts", "parser")}
+
+
 def update():
     """Завантажує PDF і розбирає нові/змінені/раніше нерозібрані.
 
@@ -256,11 +267,11 @@ def update():
         h = hashlib.sha256(pdf).hexdigest()
         old = known.get(key, {})
         good = old.get("data") if "data" in old else None
-        if good is not None and old.get("sha256") == h:  # уже розібрано, файл не змінився
+        if good is not None and old.get("sha256") == h and old.get("parser") == parse.VERSION:  # уже розібрано актуальним парсером
             if old.pop("failed", None):  # коледж повернув робочу версію файлу
                 jsave(SRC / f"{key}.json", old)
             continue
-        # сюди потрапляє: новий файл, змінений файл, або файл, який минулого разу не розібрався (повтор)
+        # сюди потрапляє: новий файл, змінений файл, зміна версії парсера, або файл, який минулого разу не розібрався (повтор)
         try:
             data = parse_pdf(kind, pdf, title, good if kind == "schedule" else None)
         except Exception as e:  # noqa: BLE001
@@ -277,7 +288,7 @@ def update():
             keep = " Показую попередню версію цього файлу." if good is not None else ""
             problems.append({"id": f"parse:{key}", "text": f"Не вдалося розібрати PDF «{title}»: {err}.{keep}", "url": url})
             continue
-        rec = {"file": fname, "title": title, "url": url, "kind": kind, "sha256": h,
+        rec = {"file": fname, "title": title, "url": url, "kind": kind, "sha256": h, "parser": parse.VERSION,
                "first_seen": old.get("first_seen") or stamp(), "updated": stamp(), "data": data}
         jsave(SRC / f"{key}.json", rec)
         known[key] = rec
@@ -285,7 +296,7 @@ def update():
             continue
         ekey = f"{kind}:{key}:{h[:16]}"
         if kind == "schedule":
-            if good == data:  # файл перезалили без змін у розкладі — не турбуємо людей
+            if good is not None and _items_signature(good) == _items_signature(data):  # без змін у парах (або лише doubts/version) — не турбуємо людей
                 continue
             events.append({"type": "schedule", "key": ekey, "course": data["course"], "from": data["from"],
                            "to": data["to"], "title": title, "url": url, "changed": good is not None})
@@ -306,13 +317,87 @@ def update():
         end = d.get("to") if isinstance(d, dict) else max((z["date"] for z in d or []), default="")
         if (end or "") < limit:
             (SRC / f"{key}.json").unlink(missing_ok=True); known.pop(key)
+        elif (seen and rec.get("kind") == "schedule" and "data" in rec and rec.get("parser") != parse.VERSION
+              and (end or "") >= today().isoformat() and rec.get("url", "").startswith("https://nlu.edu.ua/")):
+            try:
+                pdf = http(rec["url"], tries=PDF_TRY)
+                data = parse_pdf("schedule", pdf, rec.get("title", key), rec["data"])
+                rec = {**rec, "sha256": hashlib.sha256(pdf).hexdigest(), "parser": parse.VERSION, "updated": stamp(), "data": data}
+                jsave(SRC / f"{key}.json", rec)
+                known[key] = rec
+            except Exception:  # noqa: BLE001
+                pass
     for k, rec in known.items():
         rec["on_page"] = k in on_page
     return known, events, problems, unchecked
 
 
-# ---------------------------------------------------------------- збірка даних по групах
-def build(sources):
+# ---------------------------------------------------------------- збірка даних по групах і сумніви
+def resolutions_path():
+    return DATA / "resolutions.json"
+
+
+def sync_resolutions():
+    """Підтягує відповіді адміна з KV воркера і дописує в data/resolutions.json."""
+    res = jload(resolutions_path(), {})
+    if not TOKEN:
+        return res
+    w = Worker()
+    if not w.url:
+        return res
+    kv = w.get("resolutions")
+    if isinstance(kv, dict) and kv:
+        changed = False
+        for did, val in kv.items():
+            if did not in res or (val.get("at", "") > (res[did] or {}).get("at", "")):
+                res[did] = val
+                changed = True
+        if changed:
+            jsave(resolutions_path(), res)
+    return res
+
+
+def _apply_resolutions(items, resolutions):
+    if not resolutions:
+        return items
+    out = []
+    for it in items:
+        did = it.get("doubt")
+        if did and did in resolutions:
+            keep = resolutions[did].get("keep")
+            if keep != "all" and (not isinstance(keep, list) or it["subject"] not in keep):
+                continue
+            it = {k: v for k, v in it.items() if k != "doubt"}
+        out.append(it)
+    return out
+
+
+def collect_unresolved_doubts(sources, resolutions, sync_kv=False):
+    w = Worker() if (sync_kv and TOKEN) else None
+    seen, out = set(), []
+    for rec in sorted(sources.values(), key=lambda s: str(s.get("title", ""))):
+        if rec.get("kind") != "schedule" or "data" not in rec:
+            continue
+        d = rec["data"]
+        if d.get("to", "") < today().isoformat() and not rec.get("on_page"):
+            continue
+        for db in d.get("doubts") or []:
+            did = db["id"]
+            if did in resolutions or did in seen:
+                continue
+            seen.add(did)
+            meta = {"id": did, "course": d.get("course"), "pair": db["pair"], "start": db["start"],
+                    "groups": db["groups"], "dates": db["dates"], "options": db["options"]}
+            if w and w.url:
+                w.put(f"doubt:{did}", meta, 14 * 86400)
+            groups_s = ", ".join(db["groups"])
+            out.append({"id": f"doubt:{did}", "text": f"{d.get('course')} курс · {groups_s} · {db['pair']} пара",
+                        "url": rec.get("url", ""), "doubt": meta})
+    return out
+
+
+def build(sources, resolutions=None):
+    resolutions = resolutions if resolutions is not None else jload(resolutions_path(), {})
     schedules = sorted([s for s in sources.values() if s.get("kind") == "schedule" and "data" in s],
                        key=lambda s: (s["first_seen"], s["data"]["from"]))
     changes_src = [s for s in sources.values() if s.get("kind") == "changes" and "data" in s]
@@ -341,12 +426,13 @@ def build(sources):
             if groups[n]["course"] != c:
                 continue
             items = [dict(it) for it in s["data"]["items"] if it["group"] == n and it["date"] == iso]
+            items = _apply_resolutions(items, resolutions)
             for it in items:
                 it.pop("group"); it.pop("date")
                 it.setdefault("room", "потік" if it.get("stream") else groups[n].get("room", ""))
             if date.fromisoformat(iso).weekday() == 5 and not items:
                 continue
-            out[n]["days"][iso] = {"items": items, "src": s["title"]}
+            out[n]["days"][iso] = {"items": items, "src": s["title"], "url": s.get("url", "")}
     for s in changes_src:
         for z in s["data"]:
             for n in parse.change_targets(z["group"], glist):
@@ -776,20 +862,27 @@ def health_path():
 
 
 def report(problems, unchecked=(), send=True):
-    """Порівнює поточні збої з попереднім запуском: адміну — про новий збій, нагадування раз на REMIND_HOURS
-    і повідомлення про відновлення. Стан — data/health.json (комітиться). Не вдалося надіслати → повтор наступного разу."""
+    """Порівнює поточні збої й сумніви з попереднім запуском: адміну — про новий збій/сумнів, нагадування раз на REMIND_HOURS
+    і повідомлення про відновлення/закриття. Стан — data/health.json (комітиться). Не вдалося надіслати → повтор наступного разу."""
     old = jload(health_path(), {}).get("issues", {})
     cur, fresh, remind, fixed = {}, [], [], []
+    fresh_doubts, remind_doubts = [], []
     for p in problems:
         o = old.get(p["id"]) or {}
         if o.get("resolved"):  # збій повернувся раніше, ніж ми встигли повідомити про відновлення
             o = {k: v for k, v in o.items() if k != "resolved"}
         # текст першої помилки не переписуємо щоразу (тайм-аут/обрив чергуються) — інакше коміт data/ щогодини
         st = {"text": o.get("text") or p["text"], "url": p.get("url", ""), "since": o.get("since") or stamp(), "alerted": o.get("alerted")}
-        if not st["alerted"]:
-            fresh.append(st)
-        elif hours_since(st["alerted"]) >= REMIND_HOURS:
-            remind.append(st)
+        if p["id"].startswith("doubt:"):
+            if not st["alerted"]:
+                fresh_doubts.append((st, p.get("doubt")))
+            elif hours_since(st["alerted"]) >= REMIND_HOURS:
+                remind_doubts.append((st, p.get("doubt")))
+        else:
+            if not st["alerted"]:
+                fresh.append(st)
+            elif hours_since(st["alerted"]) >= REMIND_HOURS:
+                remind.append(st)
         cur[p["id"]] = st
     for pid, o in old.items():
         if pid in cur:
@@ -808,6 +901,8 @@ def report(problems, unchecked=(), send=True):
                      f"{REMIND_HOURS} год, а коли запрацює — напишу.</i>")
     if fixed:
         def back(pid, o):
+            if pid.startswith("doubt:"):
+                return f"• Питання щодо розкладу закрито ({escape(o.get('text', ''))})"
             hrs = max(1, round(hours_since(o.get("since"))))
             what = {"site": "Сайт коледжу знову доступний", "worker": "Воркер знову відповідає",
                     "state": "Сховище стану розсилок знову працює", "nopdf": "PDF на сторінці розкладу знову знайдено"}.get(pid)
@@ -832,6 +927,34 @@ def report(problems, unchecked=(), send=True):
     elif tried:  # про відновлення не вдалося повідомити — лишаємо запис, спробуємо наступного разу
         for pid, o in fixed:
             cur[pid] = {**o, "resolved": True}
+    for st, db in fresh_doubts + remind_doubts:
+        if not db:
+            continue
+        days_s = ", ".join(f"{date.fromisoformat(x):%d.%m}" for x in db.get("dates") or [])
+        opts_s = "\n".join(
+            f"  {i + 1}. <b>{escape((o.get('type', '') + ' ' + o['subject']).strip())}</b>"
+            + (f" ({escape(o['teacher'])})" if o.get("teacher") else "")
+            for i, o in enumerate(db.get("options") or [])
+        )
+        q_text = (f"❓ <b>Сумнівне місце у PDF розкладу</b>\n"
+                  f"{escape(str(db.get('course') or ''))} курс · {', '.join(escape(g) for g in db.get('groups') or [])}\n"
+                  f"Дні: {days_s} · {db['pair']} пара ({db.get('start', '')})\n\n"
+                  f"Варіанти:\n{opts_s}")
+        did = db["id"]
+        btns = [[{"text": f"{i + 1}. {(o.get('type', '') + ' ' + o['subject']).strip()}"[:40], "callback_data": f"rs:{did}:{i}"}]
+                for i, o in enumerate(db.get("options") or [])]
+        btns.append([{"text": "Обидва — підгрупи", "callback_data": f"rs:{did}:all"}])
+        if send and TOKEN and ADMINS:
+            d_ok = False
+            for c in ADMINS:
+                r = tg("sendMessage", {"chat_id": c, "text": q_text, "parse_mode": "HTML",
+                                       "reply_markup": {"inline_keyboard": btns},
+                                       "link_preview_options": {"is_disabled": True}})
+                d_ok = d_ok or bool(r.get("ok"))
+            if d_ok:
+                st["alerted"] = stamp()
+        else:
+            log("Сумнів у PDF (без надсилання):\n" + re.sub(r"<[^>]+>", "", q_text))
     new = {"issues": cur}
     if new != jload(health_path(), {}):
         jsave(health_path(), new)
@@ -936,7 +1059,9 @@ def summary(lines):
 
 def cmd_update(a):
     sources, events, problems, unchecked = update()
-    out, pdfs = build(sources)
+    resolutions = sync_resolutions()
+    problems += collect_unresolved_doubts(sources, resolutions, sync_kv=True)
+    out, pdfs = build(sources, resolutions)
     status = {"source_down_since": issue_since("site", problems)}
     if not out:  # нічого не розібралося — не затираємо робочий сайт порожнім
         problems.append({"id": "empty", "text": "Після розбору не лишилося жодної групи — сайт не оновлено", "url": PAGE})
@@ -950,12 +1075,13 @@ def cmd_update(a):
             sync_worker_site(jload(DOCS / "data" / "index.json", None), out)
         changed = h != deployed_hash()
     deploy = bool(out) and (changed or a.mode != "auto")
+    tech_problems = [p for p in problems if not p["id"].startswith("doubt:")]
     state = {"events": events, "problems": problems, "unchecked": sorted(unchecked), "hash": h, "deploy": deploy,
              "stale_since": status["source_down_since"]}
     jsave(state_file(a), state)
-    gh_output(deploy="true" if deploy else "false", degraded="true" if problems else "false")
-    log(f"Груп: {len(out)}, PDF: {len(pdfs)}, подій: {len(events)}, проблем: {len(problems)}, сайт {'змінився' if changed else 'без змін'}")
-    for p in problems:
+    gh_output(deploy="true" if deploy else "false", degraded="true" if tech_problems else "false")
+    log(f"Груп: {len(out)}, PDF: {len(pdfs)}, подій: {len(events)}, проблем: {len(tech_problems)}, сумнівів: {len(problems) - len(tech_problems)}, сайт {'змінився' if changed else 'без змін'}")
+    for p in tech_problems:
         log(f"::error::{p['text']}")
     return state
 
@@ -972,13 +1098,14 @@ def cmd_notify(a, state=None):
     problems = list(state.get("problems") or [])
     problems += notify(out, state.get("events") or [], a.mode, only=only, stale_since=state.get("stale_since"), message=msg)
     report(problems, state.get("unchecked") or [])
-    heartbeat(problems)
-    gh_output(degraded="true" if problems else "false")
+    tech_problems = [p for p in problems if not p["id"].startswith("doubt:")]
+    heartbeat(tech_problems)
+    gh_output(degraded="true" if tech_problems else "false")
     lines = ["### Розклад ПФК", f"- подій (новий розклад / заміни): {len(state.get('events') or [])}"]
-    lines += [f"- ❌ {p['text']}" for p in problems] or ["- ✅ збоїв немає"]
+    lines += [f"- ❌ {p['text']}" for p in tech_problems] or ["- ✅ збоїв немає"]
     summary(lines)
-    if problems:
-        log("Перевірка завершилась зі збоями: " + "; ".join(p["text"] for p in problems))
+    if tech_problems:
+        log("Перевірка завершилась зі збоями: " + "; ".join(p["text"] for p in tech_problems))
     return problems
 
 

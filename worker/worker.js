@@ -298,6 +298,39 @@ async function onUpdate(env, upd) {
 
   if (cb) {
     const d = cb.data || "";
+    if (d.startsWith("rs:")) {
+      const hb = await env.USERS.get("hb", "json").catch(() => null);
+      const admins = new Set([
+        ...String(env.TELEGRAM_CHAT_ID || "").split(",").map((s) => s.trim()).filter(Boolean),
+        ...((hb?.admins || []).map(String)),
+      ]);
+      const fromId = String(cb.from?.id || "");
+      if (admins.size && !admins.has(String(chatId)) && !admins.has(fromId)) {
+        return tg(env, "answerCallbackQuery", { callback_query_id: cb.id, text: "Лише адмін може відповісти", show_alert: true });
+      }
+      const [, did, choice] = d.split(":");
+      const doubt = did ? await env.USERS.get("s:doubt:" + did, "json").catch(() => null) : null;
+      const keep = choice === "all" ? "all" : doubt?.options?.[+choice]?.subject ? [doubt.options[+choice].subject] : null;
+      if (!did || !keep) {
+        return tg(env, "answerCallbackQuery", { callback_query_id: cb.id, text: "Питання застаріло або варіант не знайдено" });
+      }
+      const res = (await env.USERS.get("s:resolutions", "json").catch(() => null)) || {};
+      const label = keep === "all" ? "Обидва (підгрупи)" : keep.join(", ");
+      res[did] = { keep, by: fromId || String(chatId), at: new Date().toISOString() };
+      await env.USERS.put("s:resolutions", JSON.stringify(res), { expirationTtl: 180 * 86400 });
+      await tg(env, "answerCallbackQuery", { callback_query_id: cb.id, text: "Прийнято" });
+      const orig = esc(cb.message?.text || "Питання щодо розкладу");
+      await edit(env, cb.message, `${orig}\n\n✅ <b>Прийнято:</b> ${esc(label)}`);
+      const repo = hb?.repo || env.GITHUB_REPO || "";
+      if (env.GH_DISPATCH_TOKEN && repo) {
+        await fetch(`https://api.github.com/repos/${repo}/actions/workflows/rozklad.yml/dispatches`, {
+          method: "POST",
+          headers: { Authorization: "Bearer " + env.GH_DISPATCH_TOKEN, Accept: "application/vnd.github+json", "User-Agent": "pfk-rozklad-worker", "content-type": "application/json" },
+          body: JSON.stringify({ ref: "main", inputs: { mode: "auto" } }),
+        }).catch(() => {});
+      }
+      return;
+    }
     tg(env, "answerCallbackQuery", { callback_query_id: cb.id });
     if (d === "courses") return edit(env, cb.message, "Обери свій курс 👇", coursesKb(index));
     if (d.startsWith("c:")) return edit(env, cb.message, `${d.slice(2)} курс — обери групу 👇`, groupsKb(index, d.slice(2)));
