@@ -4,7 +4,7 @@
  "url": "https://nlu.edu.ua/wp-content/uploads/2026/11/rozklad-1-kurs-30.11-25.12.pdf",
  "kind": "schedule",
  "sha256": "2ef16a5015adf552bb48a22d19047891920d696c828fe488f5191b460aa26797",
- "parser": 3,
+ "parser": 4,
  "first_seen": "2026-11-27T11:15+02:00",
  "updated": "2026-11-27T14:14+02:00",
  "data": {

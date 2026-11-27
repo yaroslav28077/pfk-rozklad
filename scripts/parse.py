@@ -12,10 +12,11 @@ import pymupdf
 
 from pdfgrid import cells
 
-VERSION = 3
+VERSION = 4
 GROUP_RE = re.compile(r"[А-ЯІЇЄҐ]{1,5}-\d{2}[А-ЯІЇЄҐа-яіїєґ\-]*")
 TIME_RE = re.compile(r"(\d{1,2})[:.](\d{2})\s*[-–—]\s*(\d{1,2})[:.](\d{2})")
 DAYS = {"ПОНЕДІЛОК": 0, "ВІВТОРОК": 1, "СЕРЕДА": 2, "ЧЕТВЕР": 3, "П'ЯТНИЦЯ": 4, "СУБОТА": 5}
+DAY_NAMES = ["понеділок", "вівторок", "середа", "четвер", "п'ятниця", "субота", "неділя"]
 MONTHS = {"січ": 1, "лют": 2, "бер": 3, "кві": 4, "тра": 5, "чер": 6, "лип": 7, "сер": 8, "вер": 9, "жов": 10, "лис": 11, "гру": 12}
 ROMAN = {"I": 1, "II": 2, "III": 3, "IV": 4}
 KINDS = {"лк": "Лк", "пр": "Пр", "лаб": "Лаб", "сем": "Сем"}
@@ -51,14 +52,15 @@ def _period(text):
     return date(g[2], g[1], g[0]), date(g[5], g[4], g[3])
 
 
-def _resolve_period(full, title):
+def _resolve_period_info(full, title):
     d0, d1 = _period(full)
     if not d0:
         d0, d1 = _period(title.replace("-", " - "))
     if not d0:
-        return None, None
+        return None, None, None
     if d1 < d0:
         # У шапці бувають описки (напр. «з 30.11.2026 по 25.11.2026» замість 25.12): звіряємо із заголовком або зсуваємо на місяць уперед.
+        fixed = None
         tm = re.search(r"(\d{1,2})\.(\d{2})\s*[-–—]\s*(\d{1,2})\.(\d{2})", title or "")
         if tm:
             td0, tm0, td1, tm1 = map(int, tm.groups())
@@ -66,10 +68,19 @@ def _resolve_period(full, title):
                 y1 = d0.year + (1 if tm1 < tm0 else 0)
                 cand = date(y1, tm1, td1)
                 if cand >= d0:
-                    return d0, cand
-        if d1.month == d0.month and d1.day < d0.day:
+                    fixed = cand
+        if not fixed and d1.month == d0.month and d1.day < d0.day:
             y1, m1 = (d0.year + 1, 1) if d0.month == 12 else (d0.year, d0.month + 1)
-            return d0, date(y1, m1, d1.day)
+            fixed = date(y1, m1, d1.day)
+        if fixed:
+            info = {"raw_from": d0.isoformat(), "raw_to": d1.isoformat(), "fixed_to": fixed.isoformat(),
+                    "raw_text": f"з {d0:%d.%m.%Y} по {d1:%d.%m.%Y}"}
+            return d0, fixed, info
+    return d0, d1, None
+
+
+def _resolve_period(full, title):
+    d0, d1, _ = _resolve_period_info(full, title)
     return d0, d1
 
 
@@ -116,8 +127,33 @@ def parse_lesson(text, year):
     return out
 
 
-def find_doubts(items, lessons=None):
-    """Виявляє конфлікти (кілька занять на ту саму пару) і нерозділені клітинки (`merged`), позначає `doubt`."""
+def _suggest_in_period(bad_iso, d0, d1):
+    """Шукає той самий день місяця у межах [d0, d1] (напр. 10.11 → 10.12)."""
+    bd = date.fromisoformat(bad_iso)
+    cur = date(d0.year, d0.month, 1)
+    while cur <= d1:
+        try:
+            cand = date(cur.year, cur.month, bd.day)
+            if d0 <= cand <= d1:
+                return cand.isoformat()
+        except ValueError:
+            pass
+        cur = date(cur.year + 1, 1, 1) if cur.month == 12 else date(cur.year, cur.month + 1, 1)
+    return None
+
+
+def _suggest_weekday(bad_iso, target_wd, d0, d1):
+    """Шукає сусідню дату (±1..3 дні) у періоді [d0, d1], що відповідає дню тижня рядка."""
+    bd = date.fromisoformat(bad_iso)
+    for delta in (1, -1, 2, -2, 3, -3):
+        cand = bd + timedelta(days=delta)
+        if d0 <= cand <= d1 and cand.weekday() == target_wd:
+            return cand.isoformat()
+    return None
+
+
+def find_doubts(items, lessons=None, period=None, inverted_period=None):
+    """Виявляє конфлікти, нерозділені клітинки (`merged`) та помилкові дати (`date`), позначає `doubt`."""
     slots = {}
     for it in items:
         key = (it["group"], it["date"], it["pair"], it.get("subgroup", 0))
@@ -155,7 +191,69 @@ def find_doubts(items, lessons=None):
             it["doubt"] = g["id"]
         doubts.append({"id": g["id"], "kind": g["kind"], "pair": g["pair"], "start": g["start"],
                        "options": g["options"], "groups": sorted(g["groups"]), "dates": sorted(g["dates"])})
-    doubts.sort(key=lambda d: (d["pair"], d["groups"][0], d["dates"][0]))
+
+    # Перевірка дат («по 10.11» до початку періоду, невідповідність дню тижня, перевернутий період у шапці)
+    date_doubts = {}
+    if inverted_period:
+        rf = date.fromisoformat(inverted_period["raw_from"])
+        rt = date.fromisoformat(inverted_period["raw_to"])
+        ft = date.fromisoformat(inverted_period["fixed_to"])
+        hint = f"У шапці вказано «{inverted_period['raw_text']}» ({rt:%d.%m} раніше за {rf:%d.%m}). Можливо, {ft:%d.%m.%Y}?"
+        did = hashlib.sha1(json.dumps({"kind": "date", "reason": "inverted_period", "raw": inverted_period}, ensure_ascii=False, sort_keys=True).encode()).hexdigest()[:10]
+        doubts.append({
+            "id": did, "kind": "date", "reason": "inverted_period", "pair": 0, "start": "",
+            "groups": [], "dates": [inverted_period["raw_from"]], "options": [],
+            "bad_date": inverted_period["raw_to"], "suggested": inverted_period["fixed_to"],
+            "raw_text": inverted_period["raw_text"], "hint": hint,
+        })
+    if lessons and period:
+        d0, d1 = date.fromisoformat(period[0]), date.fromisoformat(period[1])
+        d0_iso, d1_iso = period[0], period[1]
+
+        def add_date_doubt(les, reason, field, bad_iso, sug, hint):
+            sig = ("date", reason, les["pair"], les["day"], field, bad_iso, sug or "", les["subject"], les.get("teacher", ""))
+            if sig not in date_doubts:
+                did = hashlib.sha1(json.dumps({"sig": sig}, ensure_ascii=False, sort_keys=True).encode()).hexdigest()[:10]
+                lpayload = {k: les[k] for k in ("pair", "start", "end", "day", "type", "subject", "teacher",
+                                                 "online", "stream", "subgroup", "choice", "from", "to", "dates") if k in les}
+                date_doubts[sig] = {
+                    "id": did, "kind": "date", "reason": reason, "pair": les["pair"], "start": les["start"],
+                    "day": les["day"], "groups": set(), "dates": [bad_iso], "options": [],
+                    "field": field, "bad_date": bad_iso, "suggested": sug,
+                    "raw_text": les.get("_raw", les["subject"]), "hint": hint, "lesson": lpayload,
+                }
+            date_doubts[sig]["groups"].add(les["group"])
+
+        for les in lessons:
+            if les.get("to") and les["to"] < d0_iso:
+                bd = date.fromisoformat(les["to"])
+                sug = _suggest_in_period(les["to"], d0, d1)
+                hint = f"Дата «по {bd:%d.%m}» раніше за початок періоду ({d0:%d.%m}–{d1:%d.%m})" + (
+                    f". Можливо, {date.fromisoformat(sug):%d.%m}?" if sug else "")
+                add_date_doubt(les, "out_of_period", "to", les["to"], sug, hint)
+            if les.get("from") and les["from"] > d1_iso:
+                bd = date.fromisoformat(les["from"])
+                sug = _suggest_in_period(les["from"], d0, d1)
+                hint = f"Дата «з {bd:%d.%m}» пізніше за кінець періоду ({d0:%d.%m}–{d1:%d.%m})" + (
+                    f". Можливо, {date.fromisoformat(sug):%d.%m}?" if sug else "")
+                add_date_doubt(les, "out_of_period", "from", les["from"], sug, hint)
+            for dt_iso in les.get("dates") or []:
+                dt = date.fromisoformat(dt_iso)
+                if dt < d0 or dt > d1:
+                    sug = _suggest_in_period(dt_iso, d0, d1)
+                    hint = f"Дата {dt:%d.%m} поза періодом ({d0:%d.%m}–{d1:%d.%m})" + (
+                        f". Можливо, {date.fromisoformat(sug):%d.%m}?" if sug else "")
+                    add_date_doubt(les, "out_of_period", "dates", dt_iso, sug, hint)
+                elif dt.weekday() != les["day"]:
+                    sug = _suggest_weekday(dt_iso, les["day"], d0, d1)
+                    hint = f"{dt:%d.%m} — {DAY_NAMES[dt.weekday()]}, а клітинка у рядку «{DAY_NAMES[les['day']]}»" + (
+                        f". Можливо, {date.fromisoformat(sug):%d.%m}?" if sug else "")
+                    add_date_doubt(les, "weekday_mismatch", "dates", dt_iso, sug, hint)
+        for dd in date_doubts.values():
+            dd["groups"] = sorted(dd["groups"])
+            doubts.append(dd)
+
+    doubts.sort(key=lambda d: (d["pair"], (d["groups"] or [""])[0], d["dates"][0], d["id"]))
     return doubts
 
 
@@ -167,7 +265,7 @@ def _alternatives(text):
 def parse_schedule(pdf_bytes, title=""):
     doc = pymupdf.open(stream=pdf_bytes, filetype="pdf")
     full = " ".join(p.get_text() for p in doc)
-    d0, d1 = _resolve_period(full, title)
+    d0, d1, inverted_info = _resolve_period_info(full, title)
     if not d0:
         raise ValueError("не знайдено період дії розкладу («з … по …»)")
     course = _course(full) or _course(title)
@@ -284,7 +382,7 @@ def parse_schedule(pdf_bytes, title=""):
                         has_dates = bool(les.get("dates") or les.get("from") or les.get("to"))
                         les.update({"group": g.text.replace(" ", ""), "day": b["day"], "pair": b["pair"],
                                     "start": b["start"], "end": b["end"], "row": c.r0 - b["r0"],
-                                    "_span": span, "_has_dates": has_dates})
+                                    "_span": span, "_has_dates": has_dates, "_raw": " ".join(_apos(alt).split())})
                         if sub:
                             les["subgroup"] = sub
                         if b["online"]:
@@ -332,7 +430,7 @@ def parse_schedule(pdf_bytes, title=""):
                         and any(s["row"] != les["row"] and les["_span"] > s["_span"] for s in dated)):
                     continue
                 it = {k: v for k, v in les.items()
-                      if k not in ("day", "dates", "from", "to", "row", "_span", "_has_dates")}
+                      if k not in ("day", "dates", "from", "to", "row", "_span", "_has_dates", "_raw")}
                 it["date"] = iso
                 items.append(it)
         d += timedelta(days=1)
@@ -344,7 +442,7 @@ def parse_schedule(pdf_bytes, title=""):
         elif it.get("_merged"):
             uniq_items[uk]["_merged"] = True
     items = sorted(uniq_items.values(), key=lambda x: (x["group"], x["date"], x["pair"], x.get("subgroup", 0)))
-    doubts = find_doubts(items, lessons)
+    doubts = find_doubts(items, lessons, period=(d0.isoformat(), d1.isoformat()), inverted_period=inverted_info)
     return {"from": d0.isoformat(), "to": d1.isoformat(), "course": course,
             "groups": list(groups.values()), "items": items, "doubts": doubts}
 
