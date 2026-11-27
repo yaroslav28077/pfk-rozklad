@@ -8,7 +8,7 @@
   "sha256": "0ec842fd50db2a3ce5f909ab3512f4780a794f31a11be836b6832140347acce1",
   "error": "ValueError: не знайдено жодної пари",
   "since": "2026-11-27T11:15+02:00",
-  "attempts": 2,
+  "attempts": 3,
   "title": "РОЗКЛАД 2 курс 30.11-25.12",
   "url": "https://nlu.edu.ua/wp-content/uploads/2026/11/rozklad-2-kurs-30.11-25.pdf"
  }
