@@ -80,6 +80,8 @@ h1 { margin: 0; font-size: 1.35rem; font-weight: 800; letter-spacing: -.01em; }
 .chip.pr { background: #e0e7ff; color: #3730a3; }
 @media (prefers-color-scheme: dark) { .chip.pr { background: #1e2452; color: #c7d2fe; } }
 .note { margin-top: 6px; font-size: .8rem; font-weight: 700; color: var(--warn); }
+.note.warn { background: var(--warn-soft); border-radius: 8px; padding: 4px 8px; display: inline-block; }
+.note.warn a { color: inherit; }
 .lesson.now { border-color: var(--ok); box-shadow: 0 0 0 3px var(--ok-soft), var(--shadow); }
 .lesson.now .when { background: var(--ok); color: #fff; }
 .lesson.done { opacity: .55; }

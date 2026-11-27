@@ -80,13 +80,13 @@ function dur(s) {
 }
 function findDay(iso) {
   const d = SITE.days[iso];
-  if (d) return { date: iso, items: d.items };
+  if (d) return { date: iso, items: d.items, url: d.url || "" };
   return { date: iso, items: [], error: [0, 6].includes(dow(iso)) ? null : "Розклад на цю дату ще не опубліковано" };
 }
 const live = (day) => (day.items || []).filter((i) => !i.cancelled);
 
 /* ---------- компоненти ---------- */
-function lessonHTML(it, state) {
+function lessonHTML(it, state, dayUrl = "") {
   const c = it.cancelled ? "#b91c1c" : subjectColor(it.subject);
   const cls = ["lesson", "fade"];
   if (state === "now") cls.push("now");
@@ -98,6 +98,7 @@ function lessonHTML(it, state) {
   let note = "";
   if (it.cancelled) note = `<div class="note">Вікно — пари немає</div>`;
   else if (it.changed) note = `<div class="note">Заміна${it.was ? ` · було: ${esc(it.was)}` : ""}</div>`;
+  else if (it.doubt) note = `<div class="note warn">⚠ Можлива неточність у PDF — ${dayUrl ? `<a href="${esc(dayUrl)}" target="_blank" rel="noopener">звірте з офіційним розкладом</a>` : "звірте з офіційним розкладом"}</div>`;
   return `<article class="${cls.join(" ")}" style="--c:${c};--cs:${c}1a">
     <div class="when"><span class="n">${it.pair}</span><span class="t">${esc(it.start)}</span></div>
     <div class="what">
@@ -116,7 +117,7 @@ function dayListHTML(day, isToday) {
   day.items.forEach((it, k) => {
     let st = "";
     if (isToday && !it.cancelled) st = now >= toSec(it.end) ? "done" : now >= toSec(it.start) ? "now" : "";
-    out.push(lessonHTML(it, st));
+    out.push(lessonHTML(it, st, day.url));
     const nx = day.items[k + 1];
     if (nx && !it.cancelled && !nx.cancelled) {
       const gap = (toSec(nx.start) - toSec(it.end)) / 60;
@@ -174,23 +175,27 @@ function render() {
   const v = $("#view");
   if (TAB === "today") {
     const d = findDay(today);
-    v.innerHTML = heroHTML(d) + `<div class="section-title"><h2>Сьогодні</h2><span>${DAYS[dow(today)]}, ${ddmm(today)}</span></div>` + dayListHTML(d, true);
+    const pdfLnk = d.url ? ` · <a href="${esc(d.url)}" target="_blank" rel="noopener">PDF ↗</a>` : "";
+    v.innerHTML = heroHTML(d) + `<div class="section-title"><h2>Сьогодні</h2><span>${DAYS[dow(today)]}, ${ddmm(today)}${pdfLnk}</span></div>` + dayListHTML(d, true);
   } else if (TAB === "tomorrow") {
     const iso = nextSchoolDay(1);
     const d = findDay(iso);
     const L = live(d);
     const title = iso === addDays(today, 1) ? "Завтра" : "Наступний навчальний день";
     const summary = L.length ? `${L.length} ${L.length === 1 ? "пара" : L.length < 5 ? "пари" : "пар"} · ${L[0].start}–${L[L.length - 1].end}` : "";
-    v.innerHTML = `<div class="section-title"><h2>${title}</h2><span>${DAYS[dow(iso)]}, ${ddmm(iso)}</span></div>` +
+    const pdfLnk = d.url ? ` · <a href="${esc(d.url)}" target="_blank" rel="noopener">PDF ↗</a>` : "";
+    v.innerHTML = `<div class="section-title"><h2>${title}</h2><span>${DAYS[dow(iso)]}, ${ddmm(iso)}${pdfLnk}</span></div>` +
       (summary ? `<p class="muted" style="margin:0 2px 10px">${summary}</p>` : "") + dayListHTML(d, false);
   } else if (TAB === "week") {
     const monday = addDays(today, dow(today) === 0 ? -6 : 1 - dow(today));
     const startMon = dow(today) === 6 || dow(today) === 0 ? addDays(monday, 7) : monday;
     const week = [0, 1, 2, 3, 4].map((i) => addDays(startMon, i));
     if (!WEEK_SEL || !week.includes(WEEK_SEL)) WEEK_SEL = week.includes(today) ? today : week[0];
+    const wd = findDay(WEEK_SEL);
+    const pdfLnk = wd.url ? ` · <a href="${esc(wd.url)}" target="_blank" rel="noopener">PDF ↗</a>` : "";
     v.innerHTML = `<div class="section-title"><h2>Тиждень</h2><span>${ddmm(week[0])}–${ddmm(week[4])}</span></div>
-      <div class="days" role="tablist">${week.map((iso) => `<button role="tab" aria-selected="${iso === WEEK_SEL}" data-day="${iso}" class="${iso === WEEK_SEL ? "active" : ""} ${iso === today ? "today" : ""}">${SHORT[dow(iso)]}<small>${ddmm(iso)}</small></button>`).join("")}</div>
-      <div class="section-title"><h2>${DAYS[dow(WEEK_SEL)]}</h2><span>${live(findDay(WEEK_SEL)).length} пар</span></div>` + dayListHTML(findDay(WEEK_SEL), WEEK_SEL === today);
+      <div class="days" role="tablist">${week.map((iso) => `<button role="tab" aria-selected="${iso === WEEK_SEL}" aria-label="${DAYS[dow(iso)]}, ${ddmm(iso)}" data-day="${iso}" class="${iso === WEEK_SEL ? "active" : ""} ${iso === today ? "today" : ""}">${SHORT[dow(iso)]}<small>${ddmm(iso)}</small></button>`).join("")}</div>
+      <div class="section-title"><h2>${DAYS[dow(WEEK_SEL)]}</h2><span>${live(wd).length} пар${pdfLnk}</span></div>` + dayListHTML(wd, WEEK_SEL === today);
     v.querySelectorAll("[data-day]").forEach((b) => b.addEventListener("click", () => { WEEK_SEL = b.dataset.day; render(); }));
   } else if (TAB === "changes") {
     const rows = SITE.changes.filter((z) => z.date >= addDays(today, -7)).sort((a, b) => (a.date + a.pair).localeCompare(b.date + b.pair));
@@ -216,7 +221,7 @@ function render() {
         <a class="link-row" href="${esc(webcal)}">${svg("cal")}<div>Підписатися в календарі<small>Google Calendar / iPhone — оновлюється сам</small></div></a>
         <a class="link-row" href="${esc(ics)}" download>${svg("file")}<div>Завантажити .ics<small>Разовий імпорт у календар</small></div></a>
         <a class="link-row" href="#" id="install">${svg("phone")}<div>Встановити як застосунок<small id="install-hint">Іконка на головному екрані телефону</small></div></a>
-        <a class="link-row" href="${esc(INDEX.source_page)}" target="_blank" rel="noopener">${svg("ext")}<div>Сторінка розкладу коледжу<small>plc.nlu.edu.ua</small></div></a>
+        <a class="link-row" href="${esc(INDEX.source_page)}" target="_blank" rel="noopener">${svg("ext")}<div>Сторінка розкладу коледжу<small>nlu.edu.ua</small></div></a>
       </div>
       <div class="section-title"><h2>PDF на сайті коледжу</h2></div>
       <div class="card">${pdfs.map((p) => `<a class="link-row" href="${esc(p.url)}" target="_blank" rel="noopener">${svg("file")}<div>${esc(p.title)}</div></a>`).join("") || '<p class="muted">Немає</p>'}</div>`;
@@ -257,7 +262,7 @@ function tick() {
 function pickerHTML() {
   return `<div class="section-title"><h2>Обери свою групу</h2></div>` + Object.entries(INDEX.courses).map(([c, gs]) =>
     `<div class="section-title"><h2>${esc(c)} курс</h2></div><div class="days pick">${gs.map((g) =>
-      `<button data-group="${esc(g.name)}" class="${SITE && SITE.group === g.name ? "active" : ""}">${esc(g.name)}${g.room ? `<small>${esc(g.room)} ауд.</small>` : ""}</button>`).join("")}</div>`).join("");
+      `<button data-group="${esc(g.name)}" aria-label="Обрати групу ${esc(g.name)}" class="${SITE && SITE.group === g.name ? "active" : ""}">${esc(g.name)}${g.room ? `<small>${esc(g.room)} ауд.</small>` : ""}</button>`).join("")}</div>`).join("");
 }
 function groupByName(name) {
   for (const gs of Object.values(INDEX.courses)) for (const g of gs) if (g.name === name || g.slug === name) return g;
