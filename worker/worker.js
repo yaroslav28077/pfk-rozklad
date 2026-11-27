@@ -33,9 +33,9 @@ const MENU = {
   keyboard: [
     [{ text: "📅 Сьогодні", style: "primary" }, { text: "➡️ Завтра", style: "primary" }],
     [{ text: "🗓 Тиждень" }, { text: "🔄 Заміни" }],
-    [{ text: "⚙️ Налаштування" }],
+    [{ text: "📝 Відпрацювання" }, { text: "⚙️ Налаштування" }],
   ],
-  resize_keyboard: true, is_persistent: true, input_field_placeholder: "Обери кнопку або напиши групу чи прізвище",
+  resize_keyboard: true, is_persistent: true, input_field_placeholder: "Обери кнопку або напиши групу, прізвище чи предмет",
 };
 
 async function secretOf(token) {
@@ -57,11 +57,18 @@ async function loadSite(env) {
     env.USERS.get("s:site:bundle", "json").catch(() => null),
   ]);
   if (bundle?.index && (!pagesIndex || tsOf(bundle.index) >= tsOf(pagesIndex))) {
-    return { index: bundle.index, groups: bundle.groups || null, fallbackGroups: bundle.groups || null };
+    return { index: bundle.index, groups: bundle.groups || null, fallbackGroups: bundle.groups || null, consultations: bundle.consultations || null };
   }
-  if (pagesIndex) return { index: pagesIndex, groups: null, fallbackGroups: bundle?.groups || null };
+  if (pagesIndex) return { index: pagesIndex, groups: null, fallbackGroups: bundle?.groups || null, consultations: bundle?.consultations || null };
   throw new Error("data/index.json unavailable");
 }
+async function loadConsultations(env, site) {
+  if (site?.consultations?.items?.length) return site.consultations;
+  const fromPages = await getJSON(env, `data/consultations.json?v=${encodeURIComponent(site?.index?.hash || "")}`).catch(() => null);
+  return fromPages || site?.consultations || { items: [], sources: [] };
+}
+const normSubj = (s) => String(s || "").toLowerCase().replace(/\([^)]*\)/g, " ").replace(/[«»"'’ʼ.,;]/g, " ").replace(/\s+/g, " ").trim();
+const toMin = (hm) => { const [h, m] = String(hm || "0:0").split(":").map(Number); return h * 60 + m; };
 // дані групи/викладача з версією з index.json або зі свіжого KV-знімка
 const groupJSON = (env, site, slug) => {
   if (site.groups?.[slug]) return Promise.resolve(site.groups[slug]);
@@ -182,12 +189,115 @@ function fmtChanges(g) {
 const helpText = (u, chatId, g) => [
   `Я бот розкладу <b>усіх груп і викладачів ПФК НЮУ</b> 👋`,
   u ? (g?.kind === "teacher" ? `🎓 Твій розклад: <b>${esc(g.teacher)}</b>` : `👥 Твоя група: <b>${esc(u.g)}</b>`) : "👥 Спершу обери групу (/group) або викладача (/teacher)",
-  `<b>Кнопки внизу</b>\n📅 Сьогодні · ➡️ Завтра · 🗓 Тиждень · 🔄 Заміни`,
-  `<b>Сам пишу</b>\n🌅 зранку — пари на сьогодні\n🌆 увечері — пари на завтра\n🗓 у неділю — огляд тижня\n🔔 одразу — нові заміни й новий розклад`,
+  `<b>Кнопки внизу</b>\n📅 Сьогодні · ➡️ Завтра · 🗓 Тиждень · 📝 Відпрацювання · 🔄 Заміни`,
+  `<b>Сам пишу</b>\n🌅 зранку — пари на сьогодні\n🌆 увечері — пари на завтра\n🗓 у неділю — огляд тижня\n🔔 одразу — нові заміни й графік відпрацювань\n⏰ за 30 хв — нагадування на обрані консультації`,
   `Час, підгрупу й беззвучний режим — у ⚙️ <b>Налаштуваннях</b>.`,
   `Працюю і в груповому чаті: додай мене в чат і надішли /group.`,
   `<code>${chatId}</code>`,
 ].join("\n\n");
+
+async function getConsultSubs(env, chatId) {
+  const v = await env.USERS.get("cs:" + chatId, "json").catch(() => null);
+  return Array.isArray(v) ? v.map(String) : [];
+}
+async function saveConsultSubs(env, chatId, ids) {
+  const uniq = [...new Set(ids.map(String))].slice(0, 10);
+  if (!uniq.length) await env.USERS.delete("cs:" + chatId);
+  else await env.USERS.put("cs:" + chatId, JSON.stringify(uniq));
+  return uniq;
+}
+
+function searchConsultItems(items, query) {
+  const qRaw = String(query || "").trim();
+  const qLow = qRaw.toLowerCase();
+  const qNorm = normSubj(qRaw);
+  if (!qLow) return [];
+  return items.filter((c) =>
+    c.teacher.toLowerCase().includes(qLow)
+    || (c.full_name || "").toLowerCase().includes(qLow)
+    || (c.aliases || []).some((a) => a.toLowerCase().includes(qLow))
+    || (c.subjects || []).some((s) => s.toLowerCase().includes(qLow) || (qNorm && normSubj(s).includes(qNorm)))
+  );
+}
+
+function consultView(env, g, cons, mode, subs = [], query = "") {
+  const items = cons?.items || [];
+  const todayIso = kyivISO();
+  const todayWd = dow(todayIso);
+  const { hour, minute } = kyivParts(Date.now());
+  const curMin = hour * 60 + minute;
+  const subSet = new Set(subs);
+
+  let title = "📝 <b>Відпрацювання</b>";
+  let list = [];
+  if (mode === "q" && query) {
+    list = searchConsultItems(items, query);
+    title = `📝 <b>Пошук відпрацювань:</b> «${esc(query)}»`;
+  } else if (mode === "mine") {
+    if (g?.kind === "teacher") {
+      list = items.filter((c) => c.slug === g.slug);
+      title = `📝 <b>Мої консультації</b> · 🎓 ${esc(g.teacher)}`;
+    } else if (g) {
+      const mySubj = new Set();
+      for (const d of Object.values(g.days || {})) for (const it of d.items || []) if (it.subject) mySubj.add(normSubj(it.subject));
+      list = items.filter((c) => (c.subjects || []).some((s) => mySubj.has(normSubj(s))));
+      title = `📝 <b>Відпрацювання · мої предмети (${esc(g.group)})</b>`;
+    } else {
+      list = items;
+    }
+  } else if (mode === "subs") {
+    list = items.filter((c) => subSet.has(c.id));
+    title = "🔔 <b>Мої нагадування про відпрацювання</b>";
+  } else if (mode.startsWith("d:")) {
+    const dnum = +mode.slice(2) || 1;
+    list = items.filter((c) => c.day_num === dnum);
+    title = `📝 <b>Відпрацювання · ${DAYS[dnum] || ""}</b>`;
+  } else {
+    const wd = todayWd >= 1 && todayWd <= 5 ? todayWd : 1;
+    list = items.filter((c) => c.day_num === wd);
+    title = `📝 <b>Відпрацювання · ${DAYS[wd]}</b>${wd === todayWd ? " (сьогодні)" : ""}`;
+  }
+
+  const lines = [title];
+  if (!list.length) {
+    lines.push(mode === "subs"
+      ? "\nПоки немає підписок. Обери викладача нижче, щоб бот нагадав за 30 хв до консультації."
+      : "\nКонсультацій за цим фільтром немає.");
+  } else {
+    lines.push("");
+    for (const c of list.slice(0, 18)) {
+      const liveNow = c.day_num === todayWd && toMin(c.start) <= curMin && curMin < toMin(c.end);
+      const bell = subSet.has(c.id) ? " 🔔" : "";
+      lines.push(`${liveNow ? "🟢 " : "• "}<b>${esc(c.teacher)}</b> — ${c.day}, ${c.start}–${c.end}${bell}\n   <i>${esc((c.subjects || []).join("; "))}</i>`);
+    }
+    if (list.length > 18) lines.push(`\n<i>Показано перші 18 з ${list.length}. Уточни запит або відкрий сайт.</i>`);
+    lines.push("\n<i>Аудиторію уточнюйте у викладача. Пошук: напиши назву предмета в чат.</i>");
+  }
+
+  const subBtns = list.slice(0, 6).map((c) => ([{
+    text: `${subSet.has(c.id) ? "🔕 Скасувати" : "🔔 Нагадати за 30 хв"} · ${c.teacher} (${SHORT[c.day_num]} ${c.start})`,
+    callback_data: `co:sub:${c.id}:${mode}`,
+  }]));
+  const dayRow = [1, 2, 3, 4, 5].map((dn) => ({
+    text: SHORT[dn],
+    callback_data: `co:d:${dn}`,
+    ...(mode === `d:${dn}` || (mode === "today" && dn === todayWd) ? { style: "primary" } : {}),
+  }));
+  const siteConsultUrl = (env.SITE_URL.endsWith("/") ? env.SITE_URL : env.SITE_URL + "/") + (g ? (g.kind === "teacher" ? `?t=${encodeURIComponent(g.teacher)}#consult` : `?g=${encodeURIComponent(g.group)}#consult`) : "#consult");
+  const kb = {
+    inline_keyboard: [
+      [
+        { text: "Сьогодні", callback_data: "co:today", ...(mode === "today" ? { style: "primary" } : {}) },
+        { text: "Мої предмети", callback_data: "co:mine", ...(mode === "mine" ? { style: "primary" } : {}) },
+        { text: `🔔 (${subs.length})`, callback_data: "co:subs", ...(mode === "subs" ? { style: "primary" } : {}) },
+      ],
+      dayRow,
+      ...subBtns,
+      [{ text: "🌐 Усі відпрацювання на сайті", url: siteConsultUrl }],
+    ],
+  };
+  return [lines.join("\n"), kb];
+}
 
 // ---------------------------------------------------------------- клавіатури
 function coursesKb(index) {
@@ -307,6 +417,7 @@ function keyFromText(t) {
   if (t.startsWith("/today") || t.includes("сьогодн")) return "today";
   if (t.startsWith("/tomorrow") || t.includes("завтра")) return "tomorrow";
   if (t.startsWith("/week") || t.includes("тижд")) return "week";
+  if (t.startsWith("/consult") || t.includes("відпрац") || t.includes("консультац")) return "consult";
   if (t.startsWith("/changes") || t.includes("замін")) return "changes";
   return null;
 }
@@ -382,14 +493,26 @@ async function onUpdate(env, upd) {
       }
       const [, did, choice] = d.split(":");
       const doubt = did ? await env.USERS.get("s:doubt:" + did, "json").catch(() => null) : null;
-      const opt = doubt?.options?.[+choice];
-      const keep = choice === "all" ? "all" : opt?.subject ? [((opt.type || "") + " " + opt.subject).trim()] : null;
-      if (!did || !keep) {
+      let entry = null, label = "";
+      if (choice === "fix" && doubt?.suggested && doubt?.lesson) {
+        entry = { action: "fix", field: doubt.field, suggested: doubt.suggested, lesson: doubt.lesson, by: fromId || String(chatId), at: new Date().toISOString() };
+        label = `Виправити дату → ${ddmm(doubt.suggested)}`;
+      } else if (choice === "ignore" && doubt) {
+        entry = { action: "ignore", by: fromId || String(chatId), at: new Date().toISOString() };
+        label = "Залишити без змін";
+      } else {
+        const opt = doubt?.options?.[+choice];
+        const keep = choice === "all" ? "all" : opt?.subject ? [((opt.type || "") + " " + opt.subject).trim()] : null;
+        if (keep) {
+          entry = { keep, by: fromId || String(chatId), at: new Date().toISOString() };
+          label = keep === "all" ? "Обидва (підгрупи)" : keep.join(", ");
+        }
+      }
+      if (!did || !entry) {
         return tg(env, "answerCallbackQuery", { callback_query_id: cb.id, text: "Питання застаріло або варіант не знайдено" });
       }
       const res = (await env.USERS.get("s:resolutions", "json").catch(() => null)) || {};
-      const label = keep === "all" ? "Обидва (підгрупи)" : keep.join(", ");
-      res[did] = { keep, by: fromId || String(chatId), at: new Date().toISOString() };
+      res[did] = entry;
       await env.USERS.put("s:resolutions", JSON.stringify(res), { expirationTtl: 180 * 86400 });
       await tg(env, "answerCallbackQuery", { callback_query_id: cb.id, text: "Прийнято" });
       const orig = esc(cb.message?.text || "Питання щодо розкладу");
@@ -403,6 +526,25 @@ async function onUpdate(env, upd) {
         }).catch(() => {});
       }
       return;
+    }
+    if (d.startsWith("co:")) {
+      tg(env, "answerCallbackQuery", { callback_query_id: cb.id });
+      const [cons, g, subs0] = await Promise.all([
+        loadConsultations(env, site),
+        groupData(user).catch(() => null),
+        getConsultSubs(env, chatId),
+      ]);
+      let subs = subs0;
+      let mode = d.slice(3);
+      if (d.startsWith("co:sub:")) {
+        const parts = d.split(":");
+        const slotId = parts.slice(2, -1).join(":");
+        mode = parts[parts.length - 1] || "today";
+        subs = subs.includes(slotId) ? subs.filter((x) => x !== slotId) : [...subs, slotId];
+        subs = await saveConsultSubs(env, chatId, subs);
+      }
+      const [ct, ckb] = consultView(env, g, cons, mode, subs);
+      return edit(env, cb.message, ct, ckb);
     }
     tg(env, "answerCallbackQuery", { callback_query_id: cb.id });
     if (d === "courses") return edit(env, cb.message, "Обери свій курс або режим викладача 👇", coursesKb(index));
@@ -448,6 +590,13 @@ async function onUpdate(env, upd) {
   if (key === "teacher") return send(env, chatId, "🎓 Обери викладача (або просто напиши прізвище в чат) 👇", teachersKb(index, 0));
   if (key === "stop") { await env.USERS.delete("u:" + chatId); return send(env, chatId, "Готово, я більше не писатиму. Повернутися — /start", { remove_keyboard: true }); }
   if (key === "settings") return user ? showSettings(env, chatId, site, user) : send(env, chatId, "Спершу обери групу або викладача 👇", coursesKb(index));
+  if (key === "consult") {
+    const cq = text.replace(/^\/\S+\s*/, "").trim();
+    const isCmdQuery = text.startsWith("/consult") && cq.length >= 2;
+    const [cons, g, subs] = await Promise.all([loadConsultations(env, site), groupData(user).catch(() => null), getConsultSubs(env, chatId)]);
+    const [ct, ckb] = consultView(env, g, cons, isCmdQuery ? "q" : "today", subs, isCmdQuery ? cq : "");
+    return send(env, chatId, ct, ckb);
+  }
   if (key) {
     const g = await groupData(user);
     if (!g) return send(env, chatId, "Спершу обери групу або викладача 👇", coursesKb(index));
@@ -463,7 +612,15 @@ async function onUpdate(env, upd) {
       inline_keyboard: tMatches.map((m) => [{ text: m.name, callback_data: "g:" + m.slug }]),
     });
   }
-  if (msg.chat.type === "private") return send(env, chatId, "Не зрозумів 🤔 Натисни кнопку внизу або напиши назву групи (напр. СОБ-11) чи прізвище викладача.", MENU);
+  if (norm(text).length >= 3) {
+    const cons = await loadConsultations(env, site);
+    if (searchConsultItems(cons.items || [], text).length) {
+      const [g, subs] = await Promise.all([groupData(user).catch(() => null), getConsultSubs(env, chatId)]);
+      const [ct, ckb] = consultView(env, g, cons, "q", subs, text);
+      return send(env, chatId, ct, ckb);
+    }
+  }
+  if (msg.chat.type === "private") return send(env, chatId, "Не зрозумів 🤔 Натисни кнопку внизу або напиши назву групи (напр. СОБ-11), прізвище чи предмет.", MENU);
 }
 
 // ---------------------------------------------------------------- API для GitHub Actions
@@ -703,22 +860,83 @@ async function runScheduledDigests(env, nowMs = Date.now()) {
   return out;
 }
 
+async function runConsultReminders(env, nowMs = Date.now()) {
+  const { iso: today, hour, minute } = kyivParts(nowMs);
+  const wd = dow(today);
+  if (wd < 1 || wd > 5) return { skipped: "weekend" };
+  const subKeys = [];
+  let cursor;
+  do {
+    const r = await env.USERS.list({ prefix: "cs:", cursor });
+    subKeys.push(...r.keys.map((k) => k.name));
+    cursor = r.list_complete ? null : r.cursor;
+  } while (cursor);
+  if (!subKeys.length) return { subs: 0 };
+
+  const bundle = await env.USERS.get("s:site:bundle", "json").catch(() => null);
+  const cons = bundle?.consultations?.items?.length
+    ? bundle.consultations
+    : await getJSON(env, "data/consultations.json").catch(() => null);
+  const items = cons?.items || [];
+  if (!items.length) return { skipped: "no-consult-data" };
+
+  const curMin = hour * 60 + minute;
+  const dueById = new Map();
+  for (const c of items) {
+    if (c.day_num !== wd) continue;
+    const diff = toMin(c.start) - curMin;
+    if (diff >= 25 && diff <= 35) dueById.set(c.id, { c, diff });
+  }
+  if (!dueById.size) return { skipped: "no-due-slots" };
+
+  let sent = 0;
+  for (const k of subKeys) {
+    if (sent >= MAX_SENDS_PER_TICK) break;
+    const chatId = k.slice(3);
+    const ids = await env.USERS.get(k, "json").catch(() => null);
+    if (!Array.isArray(ids)) continue;
+    for (const id of ids) {
+      const hit = dueById.get(id);
+      if (!hit) continue;
+      const dedupKey = `s:crem:${today}:${id}:${chatId}`;
+      if (await env.USERS.get(dedupKey)) continue;
+      const { c, diff } = hit;
+      const text = `🔔 <b>Нагадування про відпрацювання</b>\nЧерез ${diff} хв (о ${c.start}–${c.end}) консультує <b>${esc(c.teacher)}</b>\n📚 ${esc((c.subjects || []).join("; "))}\n\n<i>Аудиторію уточнюйте у викладача.</i>`;
+      const r = await send(env, chatId, text, { inline_keyboard: [[{ text: "🔕 Вимкнути нагадування", callback_data: `co:sub:${c.id}:today` }]] }).catch(() => null);
+      if (r?.ok) {
+        await env.USERS.put(dedupKey, "1", { expirationTtl: 2 * 86400 });
+        sent++;
+      } else if ((r?.error_code === 400 || r?.error_code === 403) && PERM_DROP_RE.test(String(r?.description || ""))) {
+        await env.USERS.delete(k);
+      }
+    }
+  }
+  return { sent };
+}
+
 async function scheduled(env, nowMs = Date.now()) {
-  const digest = await runScheduledDigests(env, nowMs).catch((e) => ({ error: String(e?.message || e) }));
   const { hour: h, minute } = kyivParts(nowMs);
-  if (minute > 0 && minute < 15) return { digest };
+  const consultRem = await runConsultReminders(env, nowMs).catch((e) => ({ error: String(e?.message || e) }));
+  const digest = minute <= 15
+    ? await runScheduledDigests(env, nowMs).catch((e) => ({ error: String(e?.message || e) }))
+    : { skipped: "off-window" };
+  if (minute > 0 && minute < 15) return { digest, consultRem };
   const hb = await env.USERS.get("hb", "json");
-  if (!hb) return { digest, skipped: "no heartbeat yet" };
+  if (!hb) return { digest, consultRem, skipped: "no heartbeat yet" };
   const ageH = (nowMs - hb.ts) / 3600e3;
-  const res = { digest, ageH: Math.round(ageH * 10) / 10 };
+  const res = { digest, consultRem, ageH: Math.round(ageH * 10) / 10 };
   const repo = hb.repo || env.GITHUB_REPO || "";
   if (minute >= 15 && env.GH_DISPATCH_TOKEN && repo && h >= 6 && h <= 22 && ageH >= 0.75) {
-    const r = await fetch(`https://api.github.com/repos/${repo}/actions/workflows/rozklad.yml/dispatches`, {
-      method: "POST",
-      headers: { Authorization: "Bearer " + env.GH_DISPATCH_TOKEN, Accept: "application/vnd.github+json", "User-Agent": "pfk-rozklad-worker", "content-type": "application/json" },
-      body: JSON.stringify({ ref: "main", inputs: { mode: "auto" } }),
-    });
-    res.dispatched = r.status;
+    const dispLock = await env.USERS.get("s:disp");
+    if (!dispLock) {
+      const r = await fetch(`https://api.github.com/repos/${repo}/actions/workflows/rozklad.yml/dispatches`, {
+        method: "POST",
+        headers: { Authorization: "Bearer " + env.GH_DISPATCH_TOKEN, Accept: "application/vnd.github+json", "User-Agent": "pfk-rozklad-worker", "content-type": "application/json" },
+        body: JSON.stringify({ ref: "main", inputs: { mode: "auto" } }),
+      });
+      await env.USERS.put("s:disp", "1", { expirationTtl: 20 * 60 }).catch(() => {});
+      res.dispatched = r.status;
+    }
   }
   const limit = +env.WATCHDOG_HOURS || 4;
   const wd = await env.USERS.get("wd", "json");
@@ -755,6 +973,7 @@ export default {
       try {
         const site = await loadSite(env);
         if (url.pathname === "/data/index.json") return Response.json(site.index, { headers: cors });
+        if (url.pathname === "/data/consultations.json") return Response.json(await loadConsultations(env, site), { headers: cors });
         const m = url.pathname.match(/^\/data\/([gt])\/([a-z0-9-]+)\.json$/);
         if (m) {
           const g = await groupJSON(env, site, m[2]).catch(() => null);

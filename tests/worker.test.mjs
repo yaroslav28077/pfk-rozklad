@@ -513,7 +513,7 @@ test("Mini App (docs/app.js): вибір викладача завантажує
   };
 
   const els = new Map();
-  const mkEl = (id) => ({ id, innerHTML: "", textContent: "", href: "", hidden: false, dataset: {}, classList: { toggle() {} }, addEventListener() {} });
+  const mkEl = (id) => ({ id, innerHTML: "", textContent: "", href: "", hidden: false, dataset: {}, classList: { toggle() {} }, setAttribute() {}, addEventListener() {} });
   for (const id of ["#view", "#title", "#subtitle", "#ics", "#banner", "#changes-dot", "#checked", "#src", "#brand-btn"]) els.set(id, mkEl(id));
   const fetched = [];
   const ctx = vm.createContext({
@@ -544,4 +544,155 @@ test("Mini App (docs/app.js): вибір викладача завантажує
   assert.ok(!fetched.some((u) => u.startsWith("data/g/")));
   assert.equal(els.get("#title").textContent, "Губанов А.Б.");
   assert.ok(els.get("#view").innerHTML.includes("Інформатика") && els.get("#view").innerHTML.includes("СОБ-11"));
+});
+
+test("воркер: консультації (/consult), пошук «Теорія права», підписка, нагадування за 30 хв і rs:fix", async () => {
+  const env = mkEnv({ GH_DISPATCH_TOKEN: "ghp_x", GITHUB_REPO: "o/r", TELEGRAM_CHAT_ID: "900" });
+  const cons = {
+    updated: "2026-11-27T18:00",
+    sources: [{ title: "ЦК права", url: "https://nlu.edu.ua/pravo.pdf" }],
+    items: [
+      { id: "t-noha-p-p:1:1410", teacher: "Нога П.П.", full_name: "Нога Петро Петрович", slug: "t-noha-p-p", day: "Понеділок", day_num: 1, start: "14:10", end: "15:30", subjects: ["Фінансове право", "Теорія права (ПД-14)"] },
+      { id: "t-kryshtal-iu-v:2:1410", teacher: "Кришталь Ю.В.", full_name: "Кришталь Юлія Віталіївна", slug: "t-kryshtal-iu-v", day: "Вівторок", day_num: 2, start: "14:10", end: "16:00", subjects: ["Теорія права"] },
+    ],
+  };
+  await api(env, "/api/state/set", {
+    key: "site:bundle",
+    value: { hash: "hc1", updated: "2026-11-27T18:00", index: INDEX, groups: { "sob-11": GROUP }, consultations: cons },
+    ttl: 86400,
+  });
+  await env.USERS.put("u:50", "", { metadata: { g: "СОБ-11", m: 1, e: 1, c: 1, w: 1, s: 0, sg: 0, mh: 6, eh: 18 } });
+
+  // 1) Пошук за предметом "Теорія права" у чаті знаходить і Нога П.П., і Кришталь Ю.В.
+  calls = [];
+  let done;
+  await worker.fetch(new Request("https://w.test/", {
+    method: "POST",
+    headers: { "X-Telegram-Bot-Api-Secret-Token": SECRET },
+    body: JSON.stringify({ message: { chat: { id: 50, type: "private" }, text: "Теорія права" } }),
+  }), env, { waitUntil: (p) => (done = p) });
+  await done;
+  const searchMsg = tgSends().at(-1).body;
+  assert.ok(searchMsg.text.includes("Нога П.П.") && searchMsg.text.includes("Кришталь Ю.В."));
+
+  // 2) Підписка на нагадування через callback co:sub:t-kryshtal-iu-v:2:1410:today
+  calls = [];
+  await worker.fetch(new Request("https://w.test/", {
+    method: "POST",
+    headers: { "X-Telegram-Bot-Api-Secret-Token": SECRET },
+    body: JSON.stringify({ callback_query: { id: "cb_co", from: { id: 50 }, message: { chat: { id: 50 }, message_id: 9, text: "Відпрацювання" }, data: "co:sub:t-kryshtal-iu-v:2:1410:today" } }),
+  }), env, { waitUntil: (p) => (done = p) });
+  await done;
+  assert.deepEqual(await env.USERS.get("cs:50", "json"), ["t-kryshtal-iu-v:2:1410"]);
+
+  // 3) Cron о 13:40 у вівторок (за 30 хв до 14:10) надсилає нагадування 1 раз без дублів
+  const run = (iso) => new Promise((res) => worker.scheduled({ scheduledTime: Date.parse(iso) }, env, { waitUntil: (p) => p.then(res) }));
+  calls = [];
+  // Вівторок 2026-12-01 13:40 за Києвом = 11:40 UTC
+  await run("2026-12-01T11:40:00Z");
+  assert.equal(tgSends().length, 1);
+  assert.ok(tgSends()[0].body.text.includes("Нагадування про відпрацювання") && tgSends()[0].body.text.includes("Кришталь Ю.В."));
+  await run("2026-12-01T11:40:00Z");
+  assert.equal(tgSends().length, 1);
+
+  // 4) Callback rs:<did>:fix для сумніву kind="date"
+  await api(env, "/api/state/set", {
+    key: "doubt:ddate1",
+    value: { id: "ddate1", kind: "date", field: "to", suggested: "2026-12-10", lesson: { pair: 2, subject: "Фінансове право" } },
+    ttl: 86400,
+  });
+  calls = [];
+  await worker.fetch(new Request("https://w.test/", {
+    method: "POST",
+    headers: { "X-Telegram-Bot-Api-Secret-Token": SECRET },
+    body: JSON.stringify({ callback_query: { id: "cb_fix", from: { id: 900 }, message: { chat: { id: 900 }, message_id: 11, text: "Сумнівна дата" }, data: "rs:ddate1:fix" } }),
+  }), env, { waitUntil: (p) => (done = p) });
+  await done;
+  const savedRes = await env.USERS.get("s:resolutions", "json");
+  assert.equal(savedRes.ddate1.action, "fix");
+  assert.equal(savedRes.ddate1.suggested, "2026-12-10");
+});
+
+test("Mini App (docs/app.js): вкладка Відпрац. (вівторок 14:20 = 8 зараз), пошук Теорія права, вибір тижня та Сьогодні/Завтра", async () => {
+  const vm = await import("node:vm");
+  const { readFileSync } = await import("node:fs");
+  const appSrc = readFileSync(new URL("../docs/app.js", import.meta.url), "utf8");
+  const cons = JSON.parse(readFileSync(new URL("./golden/consultations.json", import.meta.url), "utf8"));
+  const idx = {
+    hash: "v8", short: "ПФК НЮУ", bot: "pfkrozkladBot", source_page: "https://nlu.edu.ua/", updated: "2026-12-01T14:20",
+    courses: { 1: [{ name: "ПД-14", slug: "pd-14", room: "305" }] },
+    teachers: [{ name: "Нога П.П.", slug: "t-noha-p-p", degree: "", courses: [1, 3], subjects: ["Фінансове право"] }],
+    pdfs: [],
+  };
+  const grpDoc = {
+    group: "ПД-14", course: 1, slug: "pd-14", room: "305", changes: [],
+    days: {
+      "2026-12-01": { items: [
+        { pair: 1, start: "08:00", end: "09:20", type: "Пр", subject: "Теорія права", teacher: "Кришталь Ю.В." },
+        { pair: 2, start: "09:30", end: "10:50", type: "Пр", subject: "Математика", teacher: "Харченко А.В." },
+      ] },
+      "2026-12-08": { items: [
+        { pair: 1, start: "08:00", end: "09:20", type: "Лк", subject: "Історія України", teacher: "Крайсвітня Ю.В." },
+      ] },
+    },
+  };
+
+  // Фіксований час: вівторок 2026-12-01 14:20 за Києвом (12:20 UTC)
+  const FixedDate = class extends Date {
+    constructor(...args) { super(...(args.length ? args : ["2026-12-01T12:20:00Z"])); }
+    static now() { return Date.parse("2026-12-01T12:20:00Z"); }
+  };
+  const els = new Map();
+  const listeners = {};
+  const mkEl = (id) => ({
+    id, innerHTML: "", textContent: "", href: "", hidden: false, dataset: {},
+    classList: { toggle() {} },
+    setAttribute() {},
+    addEventListener(ev, fn) { (listeners[id] = listeners[id] || {})[ev] = fn; },
+    querySelectorAll: () => [],
+    querySelector: () => null,
+  });
+  for (const id of ["#view", "#title", "#subtitle", "#ics", "#banner", "#changes-dot", "#checked", "#src", "#brand-btn"]) els.set(id, mkEl(id));
+  const ctx = vm.createContext({
+    URL, URLSearchParams, Intl, Date: FixedDate, Set, Promise, Math, Object, Array, String, Number, Boolean, RegExp,
+    location: { href: "https://site.test/?g=ПД-14#consult", pathname: "/", search: "?g=ПД-14", hash: "#consult" },
+    history: { replaceState() {} },
+    localStorage: { _m: {}, getItem(k) { return this._m[k] || null; }, setItem(k, v) { this._m[k] = v; } },
+    navigator: {},
+    window: { addEventListener() {}, matchMedia: () => ({ matches: false }), scrollTo() {} },
+    document: { hidden: false, title: "", querySelector: (s) => els.get(s) || null, querySelectorAll: () => [], addEventListener() {} },
+    setInterval: () => 0,
+    fetch: async (url) => {
+      if (url.startsWith("data/index.json")) return { ok: true, json: async () => idx };
+      if (url.startsWith("data/consultations.json")) return { ok: true, json: async () => ({ items: cons, sources: [] }) };
+      if (url.startsWith("data/g/pd-14.json")) return { ok: true, json: async () => grpDoc };
+      throw new Error("unexpected fetch: " + url);
+    },
+  });
+  vm.runInContext(appSrc, ctx);
+  await new Promise((r) => setTimeout(r, 20));
+  const htmlConsult = els.get("#view").innerHTML;
+  assert.ok(htmlConsult.includes("Консультують 8 викладачів"), "Expected 8 live teachers at Tue 14:20");
+
+  // Пошук "Теорія права" знаходить і Кришталь Ю.В., і Нога П.П.
+  ctx.CONSULT_Q = "Теорія права";
+  ctx.render();
+  const htmlSearch = els.get("#view").innerHTML;
+  assert.ok(htmlSearch.includes("Кришталь Ю.В.") && htmlSearch.includes("Нога П.П."));
+
+  // Вкладка Тиждень: перемикання на 07.12–11.12 і відмінювання "2 пари"
+  ctx.TAB = "week";
+  ctx.render();
+  const htmlWeek1 = els.get("#view").innerHTML;
+  assert.ok(htmlWeek1.includes("30.11–04.12") && htmlWeek1.includes("2 пари"));
+  assert.deepEqual([...ctx.availWeeks("2026-12-01").weeks], ["2026-11-30", "2026-12-07"]);
+  ctx.WEEK_MON = "2026-12-07";
+  ctx.WEEK_SEL = "2026-12-08";
+  ctx.render();
+  assert.ok(els.get("#view").innerHTML.includes("07.12–11.12") && els.get("#view").innerHTML.includes("Історія України"));
+
+  // Підказка консультації у картці пари студента
+  ctx.TAB = "today";
+  ctx.render();
+  assert.ok(els.get("#view").innerHTML.includes("Консультація: вт 14:10–16:00"));
 });

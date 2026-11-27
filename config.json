@@ -3,6 +3,7 @@
   "short": "ПФК НЮУ",
   "timezone": "Europe/Kyiv",
   "source_page": "https://nlu.edu.ua/instytuty-fakultety/poltavskyj-fahovyj-koledzh/informacziya-dlya-studentiv/rozklad-provedennya-zanyat/",
+  "consult_page": "https://nlu.edu.ua/instytuty-fakultety/poltavskyj-fahovyj-koledzh/informacziya-dlya-studentiv/grafik-cherguvan-vykladachiv/",
   "bells": {"1": ["08:00", "09:20"], "2": ["09:30", "10:50"], "3": ["11:00", "12:15"], "4": ["12:45", "14:00"], "5": ["14:10", "15:30"], "6": ["15:40", "17:00"]},
   "morning_hour": 6,
   "evening_hour": 18,

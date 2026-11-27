@@ -41,6 +41,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import consult  # noqa: E402
 import parse  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -49,6 +50,7 @@ SRC = DATA / "sources"
 CFG = json.loads((ROOT / "config.json").read_text(encoding="utf-8"))
 TZ = ZoneInfo(CFG.get("timezone", "Europe/Kyiv"))
 PAGE = CFG["source_page"]
+CONSULT_PAGE = CFG.get("consult_page", "")
 BELLS = {int(k): tuple(v) for k, v in CFG["bells"].items()}
 UA = {"User-Agent": "Mozilla/5.0 (pfk-rozklad bot; +https://github.com)"}
 SHORTD = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Нд"]
@@ -124,28 +126,23 @@ def uk_sort_key(s):
     return tuple((0, UK_ORDER[ch]) if ch in UK_ORDER else (1, ord(ch)) for ch in str(s or "").upper())
 
 
-def _lev1(a, b):
-    """True, якщо відстань Левенштейна між двома рядками <= 1."""
+def _levenshtein(a, b):
+    """Відстань Левенштейна між двома рядками."""
     if a == b:
-        return True
-    la, lb = len(a), len(b)
-    if abs(la - lb) > 1:
-        return False
-    if la == lb:
-        return sum(x != y for x, y in zip(a, b)) <= 1
-    if la > lb:
+        return 0
+    if len(a) < len(b):
         a, b = b, a
-    i = j = diffs = 0
-    while i < len(a) and j < len(b):
-        if a[i] != b[j]:
-            diffs += 1
-            if diffs > 1:
-                return False
-            j += 1
-        else:
-            i += 1
-            j += 1
-    return True
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a):
+        cur = [i + 1]
+        for j, cb in enumerate(b):
+            cur.append(min(prev[j + 1] + 1, cur[j] + 1, prev[j] + (ca != cb)))
+        prev = cur
+    return prev[-1]
+
+
+def _lev1(a, b):
+    return _levenshtein(a, b) <= 1
 
 
 def parse_teacher_raw(raw):
@@ -450,14 +447,44 @@ def collect_unresolved_doubts(sources, resolutions, sync_kv=False):
             if did in resolutions or did in seen:
                 continue
             seen.add(did)
-            meta = {"id": did, "course": d.get("course"), "pair": db["pair"], "start": db["start"],
-                    "groups": db["groups"], "dates": db["dates"], "options": db["options"]}
+            meta = {"id": did, "kind": db.get("kind", "conflict"), "course": d.get("course"),
+                    "pair": db["pair"], "start": db.get("start", ""),
+                    "groups": db.get("groups") or [], "dates": db.get("dates") or [],
+                    "options": db.get("options") or []}
+            for fk in ("reason", "raw_text", "hint", "bad_date", "field", "suggested", "lesson", "day"):
+                if fk in db and db[fk] is not None:
+                    meta[fk] = db[fk]
             if w and w.url:
                 w.put(f"doubt:{did}", meta, 14 * 86400)
-            groups_s = ", ".join(db["groups"])
-            out.append({"id": f"doubt:{did}", "text": f"{d.get('course')} курс · {groups_s} · {db['pair']} пара",
-                        "url": rec.get("url", ""), "doubt": meta})
+            groups_s = ", ".join(meta["groups"]) or "шапка документа"
+            if meta["kind"] == "date":
+                txt = f"{d.get('course')} курс · {groups_s} · {meta.get('hint') or meta.get('reason')}"
+            else:
+                txt = f"{d.get('course')} курс · {groups_s} · {db['pair']} пара"
+            out.append({"id": f"doubt:{did}", "text": txt, "url": rec.get("url", ""), "doubt": meta})
     return out
+
+
+def _fixed_dates_for_doubt(db, d0, d1):
+    """Дати в межах [d0, d1], для яких застосовується підтверджене адміном виправлення дати."""
+    sug = db.get("suggested")
+    les = db.get("lesson") or {}
+    field = db.get("field")
+    if not sug or not les or "day" not in les:
+        return []
+    sd = date.fromisoformat(sug)
+    if field == "dates":
+        return [sug] if d0 <= sd <= d1 else []
+    target_wd = les["day"]
+    start_d = sd if field == "from" else (date.fromisoformat(les["from"]) if les.get("from") else d0)
+    end_d = sd if field == "to" else (date.fromisoformat(les["to"]) if les.get("to") else d1)
+    start_d, end_d = max(start_d, d0), min(end_d, d1)
+    out_dates, cur = [], start_d
+    while cur <= end_d:
+        if cur.weekday() == target_wd:
+            out_dates.append(cur.isoformat())
+        cur += timedelta(days=1)
+    return out_dates
 
 
 def build(sources, resolutions=None):
@@ -486,14 +513,33 @@ def build(sources, resolutions=None):
     for (c, iso), s in by_course_date.items():
         if date.fromisoformat(iso).weekday() == 6:
             continue
+        d0, d1 = date.fromisoformat(s["data"]["from"]), date.fromisoformat(s["data"]["to"])
+        fixed_extra = []
+        for db in s["data"].get("doubts") or []:
+            if db.get("kind") != "date":
+                continue
+            r = resolutions.get(db["id"])
+            if not r or r.get("action") != "fix":
+                continue
+            fdb = {**db, **{k: r[k] for k in ("suggested", "field", "lesson") if r.get(k)}}
+            if iso not in _fixed_dates_for_doubt(fdb, d0, d1):
+                continue
+            les = fdb.get("lesson") or {}
+            base = {k: v for k, v in les.items() if k not in ("day", "dates", "from", "to")}
+            for gn in fdb.get("groups") or []:
+                fixed_extra.append((gn, dict(base)))
         for n in out:
             if groups[n]["course"] != c:
                 continue
             items = [dict(it) for it in s["data"]["items"] if it["group"] == n and it["date"] == iso]
+            for gn, extra_it in fixed_extra:
+                if gn == n and not any(x["pair"] == extra_it["pair"] and x["subject"] == extra_it["subject"] for x in items):
+                    items.append(dict(extra_it))
             items = _apply_resolutions(items, resolutions)
             for it in items:
-                it.pop("group"); it.pop("date")
+                it.pop("group", None); it.pop("date", None)
                 it.setdefault("room", "потік" if it.get("stream") else groups[n].get("room", ""))
+            items.sort(key=lambda it: (it["pair"], it.get("subgroup", 0)))
             if date.fromisoformat(iso).weekday() == 5 and not items:
                 continue
             out[n]["days"][iso] = {"items": items, "src": s["title"], "url": s.get("url", "")}
@@ -536,8 +582,8 @@ def build(sources, resolutions=None):
     return out, pdfs
 
 
-def _canonical_teacher_map(out):
-    """Збирає відображення сирого ПІБ викладача → канонічне ім'я, ступінь, slug (із склеюванням одруків)."""
+def _canonical_teacher_map(out, typos=None):
+    """Збирає відображення сирого ПІБ викладача → канонічне ім'я, ступінь, slug (із склеюванням одруків ≤ 2)."""
     raw_names = []
     for g in out.values():
         for d in (g.get("days") or {}).values():
@@ -565,13 +611,23 @@ def _canonical_teacher_map(out):
         if deg:
             degrees[key] = deg
     canon_sur = {}
+    seen_typos = set()
     for (usur, uinit), cnt in counts.items():
         if cnt <= 2 and len(usur) >= 5:
-            match = next((ms for (ms, mi), mc in sorted(counts.items(), key=lambda kv: -kv[1])
-                          if mi == uinit and mc >= 5 and ms != usur and _lev1(usur, ms)), None)
-            if match:
+            max_d = 1 if len(usur) <= 5 else 2
+            cands = [
+                (_levenshtein(usur, ms), -mc, ms)
+                for (ms, mi), mc in counts.items()
+                if mi == uinit and mc >= 3 and mc >= cnt * 2 and ms != usur and _levenshtein(usur, ms) <= max_d
+            ]
+            if cands:
+                _, _, match = min(cands)
                 orig = next(p[2] for p in parsed.values() if p[2].upper() == match and p[3].upper() == uinit)
+                bad_orig = next(p[2] for p in parsed.values() if p[2].upper() == usur and p[3].upper() == uinit)
                 canon_sur[(usur, uinit)] = orig
+                if typos is not None and (bad_orig, orig, uinit) not in seen_typos:
+                    seen_typos.add((bad_orig, orig, uinit))
+                    typos.append({"from": f"{bad_orig} {uinit}", "to": f"{orig} {uinit}"})
     res = {}
     aliases_by_slug = {}
     for raw_r in raw_names:
@@ -775,10 +831,98 @@ def build_teachers(out):
     return teachers
 
 
-def write_site(out, pdfs, bot_name, status=None, teachers=None):
+def collect_teacher_typos(out):
+    """Повертає одноразові сповіщення про автоматично об'єднані одруківки у прізвищах викладачів."""
+    typos = []
+    _canonical_teacher_map(out, typos=typos)
+    return [{"id": f"typo:{slug(tp['from'])}:{slug(tp['to'])}",
+             "text": f"Об'єднано схоже прізвище: «{tp['from']}» → «{tp['to']}»",
+             "url": PAGE} for tp in typos]
+
+
+def consultations_path():
+    return DATA / "consultations.json"
+
+
+def load_consultations():
+    return jload(consultations_path(), {"updated": None, "sources": [], "items": []})
+
+
+def update_consultations():
+    """Завантажує й розбирає PDF графіків консультацій (відпрацювань) з CONSULT_PAGE."""
+    cur = load_consultations()
+    if not CONSULT_PAGE:
+        return cur, [], [], set()
+    url_p = urllib.parse.urlsplit(CONSULT_PAGE)
+    cpage = urllib.parse.urlunsplit((url_p.scheme, url_p.netloc, urllib.parse.quote(urllib.parse.unquote(url_p.path)), url_p.query, ""))
+    try:
+        html = http(cpage, tries=PAGE_TRY).decode("utf-8", "replace")
+    except Exception as e:  # noqa: BLE001
+        return cur, [], [{"id": "consult:site", "text": f"Сторінка графіка відпрацювань недоступна: {describe(e)}", "url": CONSULT_PAGE}], set()
+    pdfs = consult.find_consultation_pdfs(html, cpage)
+    if not pdfs:
+        return cur, [], [], set()
+    old_by_url = {s.get("url"): s for s in cur.get("sources") or [] if s.get("url")}
+    bootstrap = not old_by_url and not cur.get("items")
+    new_sources, all_recs, changed_titles, problems = [], [], [], []
+    for pinfo in pdfs:
+        url, title = pinfo["url"], pinfo["title"]
+        old = old_by_url.get(url) or {}
+        try:
+            pdf = http(url, tries=PDF_TRY)
+        except Exception as e:  # noqa: BLE001
+            problems.append({"id": f"consult:pdf:{slug(title)[:24]}", "text": f"Не вдалося завантажити PDF відпрацювань «{title}»: {describe(e)}", "url": url})
+            if old.get("records"):
+                new_sources.append(old)
+                all_recs.extend(old["records"])
+            continue
+        h = hashlib.sha256(pdf).hexdigest()
+        if old.get("sha256") == h and old.get("records"):
+            new_sources.append(old)
+            all_recs.extend(old["records"])
+            continue
+        try:
+            recs = consult.parse_consultations_pdf(pdf, url=url, title=title)
+            if not recs:
+                raise ValueError("не знайдено жодного запису консультації")
+        except Exception as e:  # noqa: BLE001
+            problems.append({"id": f"consult:parse:{slug(title)[:24]}", "text": f"Не вдалося розібрати PDF відпрацювань «{title}»: {e}", "url": url})
+            if old.get("records"):
+                new_sources.append(old)
+                all_recs.extend(old["records"])
+            continue
+        rec_entry = {"title": title, "url": url, "sha256": h, "updated": stamp(), "records": recs}
+        new_sources.append(rec_entry)
+        all_recs.extend(recs)
+        if old.get("records") != recs:
+            changed_titles.append(title)
+    if not all_recs:
+        return cur, [], problems, set()
+    merged = consult.merge_consultations(all_recs)
+    result = {
+        "updated": stamp(),
+        "source_page": CONSULT_PAGE,
+        "sources": new_sources,
+        "items": merged,
+    }
+    if not cur.get("items") or result["items"] != cur.get("items") or result["sources"] != cur.get("sources"):
+        jsave(consultations_path(), result)
+    events = []
+    if changed_titles and not bootstrap:
+        sig = hashlib.sha1("|".join(s.get("sha256", "") for s in new_sources).encode()).hexdigest()[:12]
+        events.append({"type": "consultations", "key": f"consult:{sig}", "count": len(merged), "titles": changed_titles})
+    return result, events, problems, set()
+
+
+def write_site(out, pdfs, bot_name, status=None, teachers=None, consultations=None):
     """docs/data/* і docs/ics/*. Повертає хеш вмісту (щоб не деплоїти сайт без змін).
     status.source_down_since — з якого часу сайт коледжу недоступний (сайт покаже попередження)."""
     teachers = build_teachers(out) if teachers is None else teachers
+    consult_data = consultations if consultations is not None else load_consultations()
+    consult_items = (consult_data or {}).get("items") or []
+    consult_by_slug = {}
+    for c in consult_items:
+        consult_by_slug.setdefault(c["slug"], []).append(c)
     gdir, tdir, idir = DOCS / "data" / "g", DOCS / "data" / "t", DOCS / "ics"
     for d in (gdir, tdir, idir):
         d.mkdir(parents=True, exist_ok=True)
@@ -799,19 +943,26 @@ def write_site(out, pdfs, bot_name, status=None, teachers=None):
             ent["aliases"] = t["aliases"]
         teachers_idx.append(ent)
         jsave(tdir / f"{ts}.json", t, compact=True)
-        build_ics(t, idir / f"{ts}.ics")
+        build_ics(t, idir / f"{ts}.ics", consult_by_slug.get(ts))
+    consult_pub = {
+        "updated": (consult_data or {}).get("updated"),
+        "source_page": (consult_data or {}).get("source_page") or CONSULT_PAGE,
+        "sources": [{"title": s.get("title", ""), "url": s.get("url", "")} for s in (consult_data or {}).get("sources") or []],
+        "items": consult_items,
+    }
+    jsave(DOCS / "data" / "consultations.json", consult_pub, compact=True)
     index = {"college": CFG["college"], "short": CFG.get("short", ""), "bot": bot_name, "source_page": PAGE,
-             "bells": CFG["bells"], "courses": courses, "teachers": teachers_idx, "pdfs": pdfs,
+             "consult_page": CONSULT_PAGE, "bells": CFG["bells"], "courses": courses, "teachers": teachers_idx, "pdfs": pdfs,
              "source_down_since": (status or {}).get("source_down_since")}
-    h = hashlib.sha256(json.dumps([index, out, teachers], ensure_ascii=False, sort_keys=True).encode()).hexdigest()[:16]
+    h = hashlib.sha256(json.dumps([index, out, teachers, consult_pub["items"]], ensure_ascii=False, sort_keys=True).encode()).hexdigest()[:16]
     index.update({"hash": h, "updated": now().isoformat(timespec="minutes")})
     jsave(DOCS / "data" / "index.json", index)
     return h
 
 
-def build_ics(g, target):
+def build_ics(g, target, consult_slots=None):
     is_t = g.get("kind") == "teacher"
-    stamp = now().astimezone(ZoneInfo("UTC")).strftime("%Y%m%dT%H%M%SZ")
+    stamp_s = now().astimezone(ZoneInfo("UTC")).strftime("%Y%m%dT%H%M%SZ")
     esc = lambda s: str(s or "").replace("\\", "\\\\").replace(";", "\\;").replace(",", "\\,").replace("\n", "\\n")  # noqa: E731
     out = ["BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//pfk-rozklad//UK", "CALSCALE:GREGORIAN", "METHOD:PUBLISH",
            f"X-WR-CALNAME:Розклад {g['group']}", "X-WR-TIMEZONE:Europe/Kyiv", "REFRESH-INTERVAL;VALUE=DURATION:PT6H",
@@ -831,11 +982,28 @@ def build_ics(g, target):
                 title = f"{title} ({it['group_label']})"
             desc = " · ".join(x for x in [f"Групи: {it['group_label']}" if is_t and it.get("group_label") else it.get("teacher", ""), str(it["pair"]) + " пара"] if x)
             loc = "онлайн" if it.get("online") else (f"ауд. {it['room']}" if it.get("room") and str(it["room"]).isdigit() else it.get("room", ""))
-            out += ["BEGIN:VEVENT", f"UID:{uid}@pfk-rozklad", f"DTSTAMP:{stamp}",
+            out += ["BEGIN:VEVENT", f"UID:{uid}@pfk-rozklad", f"DTSTAMP:{stamp_s}",
                     f"DTSTART;TZID=Europe/Kyiv:{d}T{it['start'].replace(':', '')}00",
                     f"DTEND;TZID=Europe/Kyiv:{d}T{it['end'].replace(':', '')}00",
                     f"SUMMARY:{esc(title)}", f"LOCATION:{esc(loc)}",
                     f"DESCRIPTION:{esc(desc)}", "END:VEVENT"]
+    if is_t and consult_slots and g.get("days"):
+        mondays = sorted({
+            (date.fromisoformat(iso) - timedelta(days=date.fromisoformat(iso).weekday()))
+            for iso in g["days"]
+        })
+        for mon in mondays:
+            for cs in consult_slots:
+                cdate = mon + timedelta(days=cs["day_num"] - 1)
+                d = cdate.strftime("%Y%m%d")
+                uid = hashlib.md5(f"consult{g['group']}{cdate.isoformat()}{cs['start']}".encode()).hexdigest()
+                desc = "Дисципліни: " + ", ".join(cs.get("subjects") or []) + ". Аудиторію уточнюйте у викладача."
+                out += ["BEGIN:VEVENT", f"UID:{uid}@pfk-rozklad", f"DTSTAMP:{stamp_s}",
+                        f"DTSTART;TZID=Europe/Kyiv:{d}T{cs['start'].replace(':', '')}00",
+                        f"DTEND;TZID=Europe/Kyiv:{d}T{cs['end'].replace(':', '')}00",
+                        f"SUMMARY:{esc('Консультація (відпрацювання)')}",
+                        f"LOCATION:{esc('аудиторію уточнюйте у викладача')}",
+                        f"DESCRIPTION:{esc(desc)}", "END:VEVENT"]
     out.append("END:VCALENDAR")
     target.write_text("\r\n".join(out) + "\r\n", encoding="utf-8")
 
@@ -1249,6 +1417,15 @@ def notify(out, events, mode, only=None, stale_since=None, message="", teachers=
                 return f"🆕 <b>{word}</b> ({date.fromisoformat(e['from']):%d.%m}–{date.fromisoformat(e['to']):%d.%m})\n\n" + fmt_week(g, mon, sg(u))
 
             D.run("ev:" + e["key"], users, sched_txt, kb, ttl=14 * 86400)
+        elif e["type"] == "consultations":
+            def consult_txt(u, e=e):
+                g = G(u)
+                if not g or not on(u, "c"):
+                    return None
+                return (f"📋 <b>Оновлено графік відпрацювань (консультацій)</b>\n"
+                        f"Усього слотів: {e['count']}.\n"
+                        f"Натисни 📝 <b>Відпрацювання</b>, щоб подивитися розклад викладачів.")
+            D.run("ev:" + e["key"], users, consult_txt, kb, ttl=14 * 86400)
     tot = D.total
     if w.url and tot["gone"]:
         w.call("/api/drop", {"ids": tot["gone"]})
@@ -1272,7 +1449,7 @@ def report(problems, unchecked=(), send=True):
     """Порівнює поточні збої й сумніви з попереднім запуском: адміну — про новий збій/сумнів, нагадування раз на REMIND_HOURS
     і повідомлення про відновлення/закриття. Стан — data/health.json (комітиться). Не вдалося надіслати → повтор наступного разу."""
     old = jload(health_path(), {}).get("issues", {})
-    cur, fresh, remind, fixed = {}, [], [], []
+    cur, fresh, remind, fixed, info_alerts = {}, [], [], [], []
     fresh_doubts, remind_doubts = [], []
     for p in problems:
         o = old.get(p["id"]) or {}
@@ -1287,6 +1464,9 @@ def report(problems, unchecked=(), send=True):
                 fresh_doubts.append((st, p.get("doubt")))
             elif hours_since(st["alerted"]) >= REMIND_HOURS:
                 remind_doubts.append((st, p.get("doubt")))
+        elif p["id"].startswith("typo:"):
+            if not st["alerted"]:
+                info_alerts.append(st)
         else:
             if not st["alerted"]:
                 fresh.append(st)
@@ -1298,7 +1478,7 @@ def report(problems, unchecked=(), send=True):
             continue
         if any(pid == x or (x.endswith(":") and pid.startswith(x)) for x in unchecked):  # не перевірялося — лишаємо як було
             cur[pid] = o
-        elif o.get("alerted"):
+        elif o.get("alerted") and not pid.startswith("typo:"):
             fixed.append((pid, o))
     lines = []
     if fresh:
@@ -1308,6 +1488,8 @@ def report(problems, unchecked=(), send=True):
     if fresh or remind:
         lines.append("<i>Бот і сайт показують останній успішно отриманий розклад. Нагадаю не раніше ніж через "
                      f"{REMIND_HOURS} год, а коли запрацює — напишу.</i>")
+    if info_alerts:
+        lines += ["ℹ️ <b>Розклад ПФК: автовиправлення прізвищ</b>"] + [f"• {escape(s['text'])}" for s in info_alerts]
     if fixed:
         def back(pid, o):
             if pid.startswith("doubt:"):
@@ -1331,7 +1513,7 @@ def report(problems, unchecked=(), send=True):
     elif lines:
         log("Адмін-повідомлення (не надіслано — немає TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID):\n" + re.sub(r"<[^>]+>", "", "\n".join(lines)))
     if delivered:
-        for s in fresh + remind:
+        for s in fresh + remind + info_alerts:
             s["alerted"] = stamp()
         for pid, o in fixed:
             if pid.startswith("doubt:") and o.get("msgs"):
@@ -1343,20 +1525,37 @@ def report(problems, unchecked=(), send=True):
     for st, db in fresh_doubts + remind_doubts:
         if not db:
             continue
-        days_s = ", ".join(f"{date.fromisoformat(x):%d.%m}" for x in db.get("dates") or [])
-        opts_s = "\n".join(
-            f"  {i + 1}. <b>{escape((o.get('type', '') + ' ' + o['subject']).strip())}</b>"
-            + (f" ({escape(o['teacher'])})" if o.get("teacher") else "")
-            for i, o in enumerate(db.get("options") or [])
-        )
-        q_text = (f"❓ <b>Сумнівне місце у PDF розкладу</b>\n"
-                  f"{escape(str(db.get('course') or ''))} курс · {', '.join(escape(g) for g in db.get('groups') or [])}\n"
-                  f"Дні: {days_s} · {db['pair']} пара ({db.get('start', '')})\n\n"
-                  f"Варіанти:\n{opts_s}")
         did = db["id"]
-        btns = [[{"text": f"{i + 1}. {(o.get('type', '') + ' ' + o['subject']).strip()}"[:40], "callback_data": f"rs:{did}:{i}"}]
-                for i, o in enumerate(db.get("options") or [])]
-        btns.append([{"text": "Обидва — підгрупи", "callback_data": f"rs:{did}:all"}])
+        if db.get("kind") == "date":
+            groups_s = ", ".join(escape(g) for g in db.get("groups") or []) or "Шапка документа"
+            day_s = DAYN[db["day"]] if db.get("day") is not None and 0 <= db["day"] < len(DAYN) else ""
+            pair_s = f"{db['pair']} пара ({db.get('start', '')})" if db.get("pair") else "період"
+            where_s = " · ".join(x for x in (day_s, pair_s) if x)
+            q_text = (f"📅 <b>Сумнівна дата у PDF розкладу</b>\n"
+                      f"{escape(str(db.get('course') or ''))} курс · {groups_s}\n"
+                      f"{where_s}\n\n"
+                      f"У PDF: <code>{escape(db.get('raw_text') or '')}</code>\n"
+                      f"💡 {escape(db.get('hint') or '')}")
+            btns = []
+            if db.get("suggested") and db.get("lesson"):
+                sug_d = date.fromisoformat(db["suggested"])
+                btns.append([{"text": f"✅ Виправити → {sug_d:%d.%m}", "callback_data": f"rs:{did}:fix"}])
+            btns.append([{"text": "✅ Залишити як у PDF" if db.get("reason") != "inverted_period" else "✅ Зрозуміло",
+                          "callback_data": f"rs:{did}:ignore"}])
+        else:
+            days_s = ", ".join(f"{date.fromisoformat(x):%d.%m}" for x in db.get("dates") or [])
+            opts_s = "\n".join(
+                f"  {i + 1}. <b>{escape((o.get('type', '') + ' ' + o['subject']).strip())}</b>"
+                + (f" ({escape(o['teacher'])})" if o.get("teacher") else "")
+                for i, o in enumerate(db.get("options") or [])
+            )
+            q_text = (f"❓ <b>Сумнівне місце у PDF розкладу</b>\n"
+                      f"{escape(str(db.get('course') or ''))} курс · {', '.join(escape(g) for g in db.get('groups') or [])}\n"
+                      f"Дні: {days_s} · {db['pair']} пара ({db.get('start', '')})\n\n"
+                      f"Варіанти:\n{opts_s}")
+            btns = [[{"text": f"{i + 1}. {(o.get('type', '') + ' ' + o['subject']).strip()}"[:40], "callback_data": f"rs:{did}:{i}"}]
+                    for i, o in enumerate(db.get("options") or [])]
+            btns.append([{"text": "Обидва — підгрупи", "callback_data": f"rs:{did}:all"}])
         if send and TOKEN and ADMINS:
             d_ok, msgs = False, dict(st.get("msgs") or {})
             for c in ADMINS:
@@ -1398,8 +1597,8 @@ def ensure_webhook():
     log(f"Вебхук → {WORKER_URL}: {'ok' if r.get('ok') else r.get('description')}")
 
 
-def sync_worker_site(index, out, teachers=None):
-    """Дублює зібраний розклад (групи й викладачі) у KV воркера (1 ключ), щоб бот працював під час збоїв GitHub Pages."""
+def sync_worker_site(index, out, teachers=None, consultations=None):
+    """Дублює зібраний розклад (групи, викладачі й консультації) у KV воркера (1 ключ), щоб бот працював під час збоїв GitHub Pages."""
     if not index or not out:
         return
     teachers = build_teachers(out) if teachers is None else teachers
@@ -1411,7 +1610,12 @@ def sync_worker_site(index, out, teachers=None):
         return
     if isinstance(cur, dict) and cur.get("hash") == index.get("hash"):
         return
+    c_data = consultations if consultations is not None else load_consultations()
     bundle = {"hash": index["hash"], "updated": index["updated"], "index": index,
+              "consultations": {"updated": (c_data or {}).get("updated"),
+                                "source_page": (c_data or {}).get("source_page") or CONSULT_PAGE,
+                                "sources": [{"title": s.get("title", ""), "url": s.get("url", "")} for s in (c_data or {}).get("sources") or []],
+                                "items": (c_data or {}).get("items") or []},
               "groups": {**{g["slug"]: g for g in out.values()}, **teachers}}
     if w.put("site:bundle", bundle, 30 * 86400):
         log("Розклад синхронізовано з KV воркера")
@@ -1427,6 +1631,7 @@ def setup_bot():
         {"command": "today", "description": "Пари сьогодні"},
         {"command": "tomorrow", "description": "Пари завтра"},
         {"command": "week", "description": "Розклад на тиждень"},
+        {"command": "consult", "description": "Відпрацювання та консультації"},
         {"command": "changes", "description": "Заміни"},
         {"command": "group", "description": "Обрати / змінити групу"},
         {"command": "teacher", "description": "Розклад викладача"},
@@ -1480,9 +1685,16 @@ def summary(lines):
 
 def cmd_update(a):
     sources, events, problems, unchecked = update()
+    consult_data, c_events, c_problems, c_unchecked = update_consultations()
+    events += c_events
+    site_down = any(p["id"] == "site" for p in problems)
+    problems += [p for p in c_problems if not (site_down and p["id"] == "consult:site")]
+    unchecked = set(unchecked) | set(c_unchecked)
     resolutions = sync_resolutions()
     problems += collect_unresolved_doubts(sources, resolutions, sync_kv=True)
     out, pdfs = build(sources, resolutions)
+    if out:
+        problems += collect_teacher_typos(out)
     teachers = build_teachers(out) if out else {}
     status = {"source_down_since": issue_since("site", problems)}
     if not out:  # нічого не розібралося — не затираємо робочий сайт порожнім
@@ -1492,17 +1704,17 @@ def cmd_update(a):
         if TOKEN:
             ensure_webhook()
         bot_name = setup_bot() if TOKEN else ""
-        h = write_site(out, pdfs, bot_name, status, teachers)
+        h = write_site(out, pdfs, bot_name, status, teachers, consult_data)
         if TOKEN:
-            sync_worker_site(jload(DOCS / "data" / "index.json", None), out, teachers)
+            sync_worker_site(jload(DOCS / "data" / "index.json", None), out, teachers, consult_data)
         changed = h != deployed_hash()
     deploy = bool(out) and (changed or a.mode != "auto")
-    tech_problems = [p for p in problems if not p["id"].startswith("doubt:")]
+    tech_problems = [p for p in problems if not p["id"].startswith(("doubt:", "typo:"))]
     state = {"events": events, "problems": problems, "unchecked": sorted(unchecked), "hash": h, "deploy": deploy,
              "stale_since": status["source_down_since"]}
     jsave(state_file(a), state)
     gh_output(deploy="true" if deploy else "false", degraded="true" if tech_problems else "false")
-    log(f"Груп: {len(out)}, викл.: {len(teachers)}, PDF: {len(pdfs)}, подій: {len(events)}, проблем: {len(tech_problems)}, сумнівів: {len(problems) - len(tech_problems)}, сайт {'змінився' if changed else 'без змін'}")
+    log(f"Груп: {len(out)}, викл.: {len(teachers)}, конс.: {len((consult_data or {}).get('items') or [])}, PDF: {len(pdfs)}, подій: {len(events)}, проблем: {len(tech_problems)}, сумнівів: {sum(1 for p in problems if p['id'].startswith('doubt:'))}, сайт {'змінився' if changed else 'без змін'}")
     for p in tech_problems:
         log(f"::error::{p['text']}")
     return state
@@ -1521,7 +1733,7 @@ def cmd_notify(a, state=None):
     problems = list(state.get("problems") or [])
     problems += notify(out, state.get("events") or [], a.mode, only=only, stale_since=state.get("stale_since"), message=msg, teachers=teachers)
     report(problems, state.get("unchecked") or [])
-    tech_problems = [p for p in problems if not p["id"].startswith("doubt:")]
+    tech_problems = [p for p in problems if not p["id"].startswith(("doubt:", "typo:"))]
     heartbeat(tech_problems)
     gh_output(degraded="true" if tech_problems else "false")
     lines = ["### Розклад ПФК", f"- подій (новий розклад / заміни): {len(state.get('events') or [])}"]

@@ -131,6 +131,7 @@ class World:
         mp.setattr(bot, "ADMINS", ["900"])
         mp.setattr(bot, "WORKER_URL", WORKER)
         mp.setattr(bot, "SITE", "https://site.test/")
+        mp.setattr(bot, "CONSULT_PAGE", "")
         mp.setattr(bot, "SLEEP", lambda s: None)
         mp.setattr(bot, "now", lambda: self.clock)
         mp.setattr(bot, "http", self.http)
@@ -756,3 +757,65 @@ def test_teacher_schedule_consolidation_changes_and_digests(w):
     assert any("Нові заміни" in msg and "Історія" in msg for msg in w.to("t_kray"))
     assert any("Нові заміни" in msg and "заміна → Історія" in msg for msg in w.to("t_khar"))
     assert not any("Сьогодні:" in msg for msg in w.to("t_kray"))
+
+
+def test_similar_surnames_lev2_date_fix_resolution_and_consult_ics(w):
+    # 1) Левенштейн <= 2 («Харчнк» і «Харчнко» → «Харченко») + сповіщення адміну
+    out_typos = {
+        "СОБ-11": {
+            "group": "СОБ-11", "course": 1, "slug": "sob-11", "room": "202", "changes": [],
+            "days": {
+                "2026-11-02": {"items": [{"pair": 1, "start": "08:00", "end": "09:20", "subject": "Математика", "teacher": "Харченко А.В."}]},
+                "2026-11-03": {"items": [{"pair": 1, "start": "08:00", "end": "09:20", "subject": "Математика", "teacher": "Харченко А.В."}]},
+                "2026-11-04": {"items": [{"pair": 1, "start": "08:00", "end": "09:20", "subject": "Математика", "teacher": "Харченко А.В."}]},
+                "2026-11-05": {"items": [{"pair": 1, "start": "08:00", "end": "09:20", "subject": "Алгебра", "teacher": "Харчнк А.В."}]},
+            },
+        }
+    }
+    teachers_t = bot.build_teachers(out_typos)
+    assert set(teachers_t) == {"t-kharchenko-a-v"}
+    typos = bot.collect_teacher_typos(out_typos)
+    assert len(typos) == 1 and "Харчнк А.В." in typos[0]["text"] and "Харченко А.В." in typos[0]["text"]
+
+    # 2) Сумнів kind="date" → підтвердження виправлення action="fix" додає пропущену пару і знімає сумнів
+    src_data = {
+        "c3": {
+            "kind": "schedule", "file": "c3", "title": "3 курс", "url": "https://u/3.pdf",
+            "first_seen": "2026-11-27", "on_page": True,
+            "data": {
+                "from": "2026-11-30", "to": "2026-12-25", "course": 3,
+                "groups": [{"name": "ПК-36-А", "course": 3, "room": "309"}],
+                "items": [
+                    {"group": "ПК-36-А", "date": "2026-12-03", "pair": 1, "start": "08:00", "end": "09:20", "type": "Пр", "subject": "Кримінальне право", "teacher": "Нога П.П."},
+                ],
+                "doubts": [{
+                    "id": "d_date_1", "kind": "date", "reason": "out_of_period", "pair": 2, "start": "09:30", "day": 3,
+                    "groups": ["ПК-36-А"], "dates": ["2026-11-10"], "options": [],
+                    "field": "to", "bad_date": "2026-11-10", "suggested": "2026-12-10",
+                    "raw_text": "Пр. Фінансове право, Нога П.П. по 10.11",
+                    "hint": "Можливо, 10.12?",
+                    "lesson": {"pair": 2, "start": "09:30", "end": "10:50", "day": 3, "type": "Пр", "subject": "Фінансове право", "teacher": "Нога П.П.", "to": "2026-11-10"},
+                }],
+            },
+        }
+    }
+    doubts = bot.collect_unresolved_doubts(src_data, {}, sync_kv=False)
+    assert len(doubts) == 1 and "10.12" in doubts[0]["text"]
+    bot.report(doubts, send=True)
+    assert any("Сумнівна дата у PDF" in t and "10.11" in t for t in w.to(900))
+    fixed_res = {"d_date_1": {"action": "fix", "field": "to", "suggested": "2026-12-10", "lesson": src_data["c3"]["data"]["doubts"][0]["lesson"]}}
+    out3, _ = bot.build(src_data, fixed_res)
+    dec3_items = out3["ПК-36-А"]["days"]["2026-12-03"]["items"]
+    assert any(it["pair"] == 2 and it["subject"] == "Фінансове право" for it in dec3_items)
+
+    # 3) ICS для викладача включає консультацію
+    teachers3 = bot.build_teachers(out3)
+    consult_slots = [{
+        "id": "t-noha-p-p:1:1410", "teacher": "Нога П.П.", "slug": "t-noha-p-p",
+        "day": "Понеділок", "day_num": 1, "start": "14:10", "end": "15:30",
+        "subjects": ["Фінансове право"],
+    }]
+    bot.write_site(out3, [], "pfkrozkladBot", teachers=teachers3, consultations={"items": consult_slots, "sources": []})
+    ics_noha = (bot.DOCS / "ics" / "t-noha-p-p.ics").read_text(encoding="utf-8")
+    assert "Консультація (відпрацювання)" in ics_noha
+    assert (bot.DOCS / "data" / "consultations.json").exists()

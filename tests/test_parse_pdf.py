@@ -7,6 +7,7 @@ import pytest
 
 from test_bot import World, bot, kyiv, user  # noqa: I001 (test_bot додає scripts/ у sys.path)
 from pdf_fixtures import FONT, changes_pdf, schedule_pdf, split_cell_schedule_pdf
+import consult  # noqa: E402
 
 GOLDEN = Path(__file__).resolve().parent / "golden"
 
@@ -72,19 +73,21 @@ def test_split_cell_without_horizontal_line():
 
 def test_golden_real_pdfs_and_no_lost_table_text():
     specs = [
-        ("rozklad-1-kurs-09_1.11-po-27-1", "schedule", "РОЗКЛАД 1 курс 09.11-27.11"),
-        ("rozklad-2-kurs-09_1.11-po-27-1", "schedule", "РОЗКЛАД 2 курс 09.11-27.11"),
-        ("rozklad-3-kurs-z-09_1.11-po-27-1", "schedule", "РОЗКЛАД 3 курс 09.11-27.11"),
-        ("rozklad-2-kurs-30.11-25", "schedule", "РОЗКЛАД 2 курс 30.11-25.12"),
-        ("zminy-do-rozkladu-z-23_1.11", "changes", "Зміни до розкладу з 23.11"),
+        ("rozklad-1-kurs-09_1.11-po-27-1", "schedule", "РОЗКЛАД 1 курс 09.11-27.11", 0),
+        ("rozklad-2-kurs-09_1.11-po-27-1", "schedule", "РОЗКЛАД 2 курс 09.11-27.11", 0),
+        ("rozklad-3-kurs-z-09_1.11-po-27-1", "schedule", "РОЗКЛАД 3 курс 09.11-27.11", 0),
+        ("rozklad-1-kurs-30.11-25.12", "schedule", "РОЗКЛАД 1 курс 30.11-25.12", 0),
+        ("rozklad-2-kurs-30.11-25", "schedule", "РОЗКЛАД 2 курс 30.11-25.12", 2),
+        ("rozklad-3-kurs-30.11-25", "schedule", "РОЗКЛАД 3 курс 30.11-25.12", 1),
+        ("zminy-do-rozkladu-z-23_1.11", "changes", "Зміни до розкладу з 23.11", 0),
     ]
-    for stem, kind, title in specs:
+    for stem, kind, title, exp_doubts in specs:
         raw = (GOLDEN / f"{stem}.pdf").read_bytes()
         expected = json.loads((GOLDEN / f"{stem}.json").read_text(encoding="utf-8"))
         actual = bot.parse.parse_schedule(raw, title) if kind == "schedule" else bot.parse.parse_changes(raw)
         assert actual == expected
         if kind == "schedule":
-            assert actual.get("doubts") == []
+            assert len(actual.get("doubts") or []) == exp_doubts
         # Жоден текст таблиці не загублено: кожне слово таблиці в області сітки має непорожню клітинку
         doc = pymupdf.open(stream=raw, filetype="pdf")
         for page in doc:
@@ -155,3 +158,48 @@ def test_doubt_rules_distinguish_electives_from_real_conflicts():
     # 4) Два маркери "Лк./Пр." без "/" (склеєний текст) → merged сумнів
     merged = bot.parse.parse_schedule(_mini_schedule("Лк. Право, Іванов І.І. Пр. Історія, Петров П.П."))
     assert len(merged["doubts"]) == 1 and merged["doubts"][0]["kind"] == "merged"
+
+
+def test_date_doubts_on_real_december_pdfs():
+    dec3 = json.loads((GOLDEN / "rozklad-3-kurs-30.11-25.json").read_text(encoding="utf-8"))
+    assert len(dec3["doubts"]) == 1
+    d3 = dec3["doubts"][0]
+    assert d3["kind"] == "date" and d3["reason"] == "out_of_period"
+    assert d3["groups"] == ["ПК-36-А"] and d3["pair"] == 2
+    assert d3["bad_date"] == "2026-11-10" and d3["suggested"] == "2026-12-10"
+    assert "10.12" in d3["hint"]
+
+    dec2 = json.loads((GOLDEN / "rozklad-2-kurs-30.11-25.json").read_text(encoding="utf-8"))
+    reasons = {db["reason"]: db for db in dec2["doubts"]}
+    assert set(reasons) == {"inverted_period", "weekday_mismatch"}
+    assert reasons["inverted_period"]["suggested"] == "2026-12-25"
+    wm = reasons["weekday_mismatch"]
+    assert set(wm["groups"]) == {"СОБ-21", "СОІ-22"} and wm["bad_date"] == "2026-12-17" and wm["suggested"] == "2026-12-18"
+
+
+def test_golden_consultations_pdfs_and_merge():
+    r1 = consult.parse_consultations_pdf(
+        (GOLDEN / "grafik-konsultaczij-czk-zo-2026-2027.pdf").read_bytes(),
+        "https://nlu.edu.ua/wp-content/uploads/2026/11/grafik-konsultaczij-czk-zagalnoosvitnih-ta-soczialno-gumanitarnyh-dysczyplin-2026-2027-2.pdf",
+        "ЦК загальноосвітніх та соціально-гуманітарних дисциплін",
+    )
+    r2 = consult.parse_consultations_pdf(
+        (GOLDEN / "grafik-konsultaczij-czk-pravo-2026-2027.pdf").read_bytes(),
+        "https://nlu.edu.ua/wp-content/uploads/2026/11/grafik-konsultaczij-czk-prava-ta-pravoohoronnoyi-diyalnosti-2026-2027.pdf",
+        "ЦК права та правоохоронної діяльності",
+    )
+    assert len(r1) == 17 and len(r2) == 17
+    merged = consult.merge_consultations(r1 + r2)
+    expected = json.loads((GOLDEN / "consultations.json").read_text(encoding="utf-8"))
+    assert merged == expected
+    assert len(merged) == 31 and len({x["slug"] for x in merged}) == 30
+    tue1420 = [x for x in merged if x["day_num"] == 2 and x["start"] <= "14:20" < x["end"]]
+    assert len(tue1420) == 8
+    trot = [x for x in merged if x["teacher"] == "Троцька В.В."]
+    assert [(x["start"], x["end"]) for x in trot] == [("16:30", "17:00"), ("17:00", "18:00")]
+    hned = next(x for x in merged if x["teacher"] == "Гнедик Ю.О.")
+    assert "Стешенко Ю.О." in hned["aliases"]
+    theory = [x["teacher"] for x in merged if any("теорія права" in s.lower() for s in x["subjects"])]
+    assert set(theory) == {"Нога П.П.", "Кришталь Ю.В."}
+    deyn = next(x for x in merged if x["teacher"] == "Дейнека В.С.")
+    assert "Практикум зі складання процесуальних документів (ПД-24п)" in deyn["subjects"]

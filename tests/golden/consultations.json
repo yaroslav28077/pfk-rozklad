@@ -1,0 +1,669 @@
+[
+ {
+  "id": "t-melkonian-a-h:1:1410",
+  "teacher": "Мелконян А.Г.",
+  "full_name": "Мелконян Арміне Гарегінівна",
+  "slug": "t-melkonian-a-h",
+  "aliases": [],
+  "day": "Понеділок",
+  "day_num": 1,
+  "start": "14:10",
+  "end": "15:30",
+  "subjects": [
+   "Адміністративне право",
+   "Адміністративне судочинство"
+  ],
+  "commissions": [
+   "ЦК права та правоохоронної діяльності"
+  ],
+  "sources": [
+   "https://nlu.edu.ua/wp-content/uploads/2026/11/grafik-konsultaczij-czk-prava-ta-pravoohoronnoyi-diyalnosti-2026-2027.pdf"
+  ]
+ },
+ {
+  "id": "t-noha-p-p:1:1410",
+  "teacher": "Нога П.П.",
+  "full_name": "Нога Петро Петрович",
+  "slug": "t-noha-p-p",
+  "aliases": [],
+  "day": "Понеділок",
+  "day_num": 1,
+  "start": "14:10",
+  "end": "15:30",
+  "subjects": [
+   "Фінансове право",
+   "Цивільне право (сімейне право, цивільний процес)",
+   "Право інтелектуальної власності у сфері підприємницької діяльності",
+   "Податкове право",
+   "Теорія права (ПД-14)"
+  ],
+  "commissions": [
+   "ЦК права та правоохоронної діяльності"
+  ],
+  "sources": [
+   "https://nlu.edu.ua/wp-content/uploads/2026/11/grafik-konsultaczij-czk-prava-ta-pravoohoronnoyi-diyalnosti-2026-2027.pdf"
+  ]
+ },
+ {
+  "id": "t-mykytenko-d-v:1:1530",
+  "teacher": "Микитенко Д.В.",
+  "full_name": "Микитенко Діана Віталіївна",
+  "slug": "t-mykytenko-d-v",
+  "aliases": [],
+  "day": "Понеділок",
+  "day_num": 1,
+  "start": "15:30",
+  "end": "16:30",
+  "subjects": [
+   "Кримінальне право",
+   "Кримінальний процес",
+   "Кримінальне право та процес"
+  ],
+  "commissions": [
+   "ЦК права та правоохоронної діяльності"
+  ],
+  "sources": [
+   "https://nlu.edu.ua/wp-content/uploads/2026/11/grafik-konsultaczij-czk-prava-ta-pravoohoronnoyi-diyalnosti-2026-2027.pdf"
+  ]
+ },
+ {
+  "id": "t-hnedyk-iu-o:2:1410",
+  "teacher": "Гнедик Ю.О.",
+  "full_name": "Стешенко Юлія Олександрівна",
+  "slug": "t-hnedyk-iu-o",
+  "aliases": [
+   "Стешенко Ю.О."
+  ],
+  "day": "Вівторок",
+  "day_num": 2,
+  "start": "14:10",
+  "end": "15:00",
+  "subjects": [
+   "Всесвітня історія",
+   "Логіка"
+  ],
+  "commissions": [
+   "ЦК загальноосвітніх та соціально-гуманітарних дисциплін"
+  ],
+  "sources": [
+   "https://nlu.edu.ua/wp-content/uploads/2026/11/grafik-konsultaczij-czk-zagalnoosvitnih-ta-soczialno-gumanitarnyh-dysczyplin-2026-2027-2.pdf"
+  ]
+ },
+ {
+  "id": "t-knysh-v-v:2:1410",
+  "teacher": "Книш В.В.",
+  "full_name": "Книш Вікторія Володимирівна",
+  "slug": "t-knysh-v-v",
+  "aliases": [],
+  "day": "Вівторок",
+  "day_num": 2,
+  "start": "14:10",
+  "end": "15:00",
+  "subjects": [
+   "Українська мова (за професійним спрямуванням)",
+   "Українська мова",
+   "Українська література"
+  ],
+  "commissions": [
+   "ЦК загальноосвітніх та соціально-гуманітарних дисциплін"
+  ],
+  "sources": [
+   "https://nlu.edu.ua/wp-content/uploads/2026/11/grafik-konsultaczij-czk-zagalnoosvitnih-ta-soczialno-gumanitarnyh-dysczyplin-2026-2027-2.pdf"
+  ]
+ },
+ {
+  "id": "t-kraisvitnia-iu-v:2:1410",
+  "teacher": "Крайсвітня Ю.В.",
+  "full_name": "Крайсвітня Юлія Володимирівна",
+  "slug": "t-kraisvitnia-iu-v",
+  "aliases": [],
+  "day": "Вівторок",
+  "day_num": 2,
+  "start": "14:10",
+  "end": "15:00",
+  "subjects": [
+   "Історія України",
+   "Історія держави і права",
+   "Основи ефективної комунікації"
+  ],
+  "commissions": [
+   "ЦК загальноосвітніх та соціально-гуманітарних дисциплін",
+   "ЦК права та правоохоронної діяльності"
+  ],
+  "sources": [
+   "https://nlu.edu.ua/wp-content/uploads/2026/11/grafik-konsultaczij-czk-zagalnoosvitnih-ta-soczialno-gumanitarnyh-dysczyplin-2026-2027-2.pdf",
+   "https://nlu.edu.ua/wp-content/uploads/2026/11/grafik-konsultaczij-czk-prava-ta-pravoohoronnoyi-diyalnosti-2026-2027.pdf"
+  ]
+ },
+ {
+  "id": "t-ovsianyk-s-a:2:1410",
+  "teacher": "Овсяник С.А.",
+  "full_name": "Овсяник Сергій Андрійович",
+  "slug": "t-ovsianyk-s-a",
+  "aliases": [],
+  "day": "Вівторок",
+  "day_num": 2,
+  "start": "14:10",
+  "end": "15:00",
+  "subjects": [
+   "Математика",
+   "Інформатика"
+  ],
+  "commissions": [
+   "ЦК загальноосвітніх та соціально-гуманітарних дисциплін"
+  ],
+  "sources": [
+   "https://nlu.edu.ua/wp-content/uploads/2026/11/grafik-konsultaczij-czk-zagalnoosvitnih-ta-soczialno-gumanitarnyh-dysczyplin-2026-2027-2.pdf"
+  ]
+ },
+ {
+  "id": "t-varyha-a-v:2:1410",
+  "teacher": "Варига А.В.",
+  "full_name": "Варига Аліна Вячеславівна",
+  "slug": "t-varyha-a-v",
+  "aliases": [],
+  "day": "Вівторок",
+  "day_num": 2,
+  "start": "14:10",
+  "end": "15:10",
+  "subjects": [
+   "Діловодство"
+  ],
+  "commissions": [
+   "ЦК права та правоохоронної діяльності"
+  ],
+  "sources": [
+   "https://nlu.edu.ua/wp-content/uploads/2026/11/grafik-konsultaczij-czk-prava-ta-pravoohoronnoyi-diyalnosti-2026-2027.pdf"
+  ]
+ },
+ {
+  "id": "t-hrushchanskyi-v-o:2:1410",
+  "teacher": "Грущанський В.О.",
+  "full_name": "Грущанський Владислав Олегович",
+  "slug": "t-hrushchanskyi-v-o",
+  "aliases": [],
+  "day": "Вівторок",
+  "day_num": 2,
+  "start": "14:10",
+  "end": "15:10",
+  "subjects": [
+   "Екологічне право",
+   "Адвокатська діяльність у практиці ЄСПЛ",
+   "Господарсько-правова відповідальність",
+   "Практикум зі складання процесуальних документів (ПК-36-А)",
+   "Безоплатна правова допомога"
+  ],
+  "commissions": [
+   "ЦК права та правоохоронної діяльності"
+  ],
+  "sources": [
+   "https://nlu.edu.ua/wp-content/uploads/2026/11/grafik-konsultaczij-czk-prava-ta-pravoohoronnoyi-diyalnosti-2026-2027.pdf"
+  ]
+ },
+ {
+  "id": "t-starostina-l-l:2:1410",
+  "teacher": "Старостіна Л.Л.",
+  "full_name": "Старостіна Любов Леонідівна",
+  "slug": "t-starostina-l-l",
+  "aliases": [],
+  "day": "Вівторок",
+  "day_num": 2,
+  "start": "14:10",
+  "end": "15:30",
+  "subjects": [
+   "Трудове право"
+  ],
+  "commissions": [
+   "ЦК права та правоохоронної діяльності"
+  ],
+  "sources": [
+   "https://nlu.edu.ua/wp-content/uploads/2026/11/grafik-konsultaczij-czk-prava-ta-pravoohoronnoyi-diyalnosti-2026-2027.pdf"
+  ]
+ },
+ {
+  "id": "t-kryshtal-iu-v:2:1410",
+  "teacher": "Кришталь Ю.В.",
+  "full_name": "Кришталь Юлія Віталіївна",
+  "slug": "t-kryshtal-iu-v",
+  "aliases": [],
+  "day": "Вівторок",
+  "day_num": 2,
+  "start": "14:10",
+  "end": "16:00",
+  "subjects": [
+   "Теорія права"
+  ],
+  "commissions": [
+   "ЦК права та правоохоронної діяльності"
+  ],
+  "sources": [
+   "https://nlu.edu.ua/wp-content/uploads/2026/11/grafik-konsultaczij-czk-prava-ta-pravoohoronnoyi-diyalnosti-2026-2027.pdf"
+  ]
+ },
+ {
+  "id": "t-dykan-a-i:2:1530",
+  "teacher": "Дикань А.І.",
+  "full_name": "Дикань Алла Іванівна",
+  "slug": "t-dykan-a-i",
+  "aliases": [],
+  "day": "Вівторок",
+  "day_num": 2,
+  "start": "15:30",
+  "end": "16:30",
+  "subjects": [
+   "Правові засади запобігання корупції"
+  ],
+  "commissions": [
+   "ЦК права та правоохоронної діяльності"
+  ],
+  "sources": [
+   "https://nlu.edu.ua/wp-content/uploads/2026/11/grafik-konsultaczij-czk-prava-ta-pravoohoronnoyi-diyalnosti-2026-2027.pdf"
+  ]
+ },
+ {
+  "id": "t-dubovych-o-v:2:1600",
+  "teacher": "Дубович О.В.",
+  "full_name": "Дубович Олеся Валеріївна",
+  "slug": "t-dubovych-o-v",
+  "aliases": [],
+  "day": "Вівторок",
+  "day_num": 2,
+  "start": "16:00",
+  "end": "16:30",
+  "subjects": [
+   "Сторона обвинувачення та слідчий суддя: основи процесуальної взаємодії",
+   "Кримінальний процес (ПД-24п)",
+   "Кримінальне право (ПД-24п)"
+  ],
+  "commissions": [
+   "ЦК права та правоохоронної діяльності"
+  ],
+  "sources": [
+   "https://nlu.edu.ua/wp-content/uploads/2026/11/grafik-konsultaczij-czk-prava-ta-pravoohoronnoyi-diyalnosti-2026-2027.pdf"
+  ]
+ },
+ {
+  "id": "t-hnidash-k-i:3:1410",
+  "teacher": "Гнідаш К.І.",
+  "full_name": "Гнідаш Катерина Ігорівна",
+  "slug": "t-hnidash-k-i",
+  "aliases": [],
+  "day": "Середа",
+  "day_num": 3,
+  "start": "14:10",
+  "end": "15:00",
+  "subjects": [
+   "Іноземна мова",
+   "Зарубіжна література"
+  ],
+  "commissions": [
+   "ЦК загальноосвітніх та соціально-гуманітарних дисциплін"
+  ],
+  "sources": [
+   "https://nlu.edu.ua/wp-content/uploads/2026/11/grafik-konsultaczij-czk-zagalnoosvitnih-ta-soczialno-gumanitarnyh-dysczyplin-2026-2027-2.pdf"
+  ]
+ },
+ {
+  "id": "t-deineka-v-s:3:1410",
+  "teacher": "Дейнека В.С.",
+  "full_name": "Дейнека Віолета Сергіївна",
+  "slug": "t-deineka-v-s",
+  "aliases": [],
+  "day": "Середа",
+  "day_num": 3,
+  "start": "14:10",
+  "end": "15:00",
+  "subjects": [
+   "Трудове право",
+   "Практикум зі складання процесуальних документів (ПД-24п)",
+   "Цивільний процес"
+  ],
+  "commissions": [
+   "ЦК права та правоохоронної діяльності"
+  ],
+  "sources": [
+   "https://nlu.edu.ua/wp-content/uploads/2026/11/grafik-konsultaczij-czk-prava-ta-pravoohoronnoyi-diyalnosti-2026-2027.pdf"
+  ]
+ },
+ {
+  "id": "t-khaliman-o-v:3:1410",
+  "teacher": "Халіман О.В.",
+  "full_name": "Халіман Оксана Володимирівна",
+  "slug": "t-khaliman-o-v",
+  "aliases": [],
+  "day": "Середа",
+  "day_num": 3,
+  "start": "14:10",
+  "end": "15:00",
+  "subjects": [
+   "Українська мова",
+   "Українська література"
+  ],
+  "commissions": [
+   "ЦК загальноосвітніх та соціально-гуманітарних дисциплін"
+  ],
+  "sources": [
+   "https://nlu.edu.ua/wp-content/uploads/2026/11/grafik-konsultaczij-czk-zagalnoosvitnih-ta-soczialno-gumanitarnyh-dysczyplin-2026-2027-2.pdf"
+  ]
+ },
+ {
+  "id": "t-povolotska-m-s:3:1500",
+  "teacher": "Поволоцька М.С.",
+  "full_name": "Поволоцька Марія Сергіївна",
+  "slug": "t-povolotska-m-s",
+  "aliases": [],
+  "day": "Середа",
+  "day_num": 3,
+  "start": "15:00",
+  "end": "16:20",
+  "subjects": [
+   "Психологія",
+   "Етика та психологія ділового спілкування"
+  ],
+  "commissions": [
+   "ЦК загальноосвітніх та соціально-гуманітарних дисциплін"
+  ],
+  "sources": [
+   "https://nlu.edu.ua/wp-content/uploads/2026/11/grafik-konsultaczij-czk-zagalnoosvitnih-ta-soczialno-gumanitarnyh-dysczyplin-2026-2027-2.pdf"
+  ]
+ },
+ {
+  "id": "t-iasko-r-m:3:1530",
+  "teacher": "Ясько Р.М.",
+  "full_name": "Ясько Ростислав Миколайович",
+  "slug": "t-iasko-r-m",
+  "aliases": [],
+  "day": "Середа",
+  "day_num": 3,
+  "start": "15:30",
+  "end": "16:50",
+  "subjects": [
+   "Фізична культура",
+   "Фізичне виховання та спеціальна фізична підготовка"
+  ],
+  "commissions": [
+   "ЦК загальноосвітніх та соціально-гуманітарних дисциплін"
+  ],
+  "sources": [
+   "https://nlu.edu.ua/wp-content/uploads/2026/11/grafik-konsultaczij-czk-zagalnoosvitnih-ta-soczialno-gumanitarnyh-dysczyplin-2026-2027-2.pdf"
+  ]
+ },
+ {
+  "id": "t-katralieiev-m-s:4:0730",
+  "teacher": "Катралєєв М.С.",
+  "full_name": "Катралєєв Михайло Сергійович",
+  "slug": "t-katralieiev-m-s",
+  "aliases": [],
+  "day": "Четвер",
+  "day_num": 4,
+  "start": "07:30",
+  "end": "08:00",
+  "subjects": [
+   "Природничі науки"
+  ],
+  "commissions": [
+   "ЦК загальноосвітніх та соціально-гуманітарних дисциплін"
+  ],
+  "sources": [
+   "https://nlu.edu.ua/wp-content/uploads/2026/11/grafik-konsultaczij-czk-zagalnoosvitnih-ta-soczialno-gumanitarnyh-dysczyplin-2026-2027-2.pdf"
+  ]
+ },
+ {
+  "id": "t-dobrynina-d-o:4:1410",
+  "teacher": "Добриніна Д.О.",
+  "full_name": "Добриніна Дарина Олександрівна",
+  "slug": "t-dobrynina-d-o",
+  "aliases": [],
+  "day": "Четвер",
+  "day_num": 4,
+  "start": "14:10",
+  "end": "15:00",
+  "subjects": [
+   "Природничі науки"
+  ],
+  "commissions": [
+   "ЦК загальноосвітніх та соціально-гуманітарних дисциплін"
+  ],
+  "sources": [
+   "https://nlu.edu.ua/wp-content/uploads/2026/11/grafik-konsultaczij-czk-zagalnoosvitnih-ta-soczialno-gumanitarnyh-dysczyplin-2026-2027-2.pdf"
+  ]
+ },
+ {
+  "id": "t-okara-o-a:4:1410",
+  "teacher": "Окара О.А.",
+  "full_name": "Окара Олександра Андріївна",
+  "slug": "t-okara-o-a",
+  "aliases": [],
+  "day": "Четвер",
+  "day_num": 4,
+  "start": "14:10",
+  "end": "15:00",
+  "subjects": [
+   "Іноземна мова"
+  ],
+  "commissions": [
+   "ЦК загальноосвітніх та соціально-гуманітарних дисциплін"
+  ],
+  "sources": [
+   "https://nlu.edu.ua/wp-content/uploads/2026/11/grafik-konsultaczij-czk-zagalnoosvitnih-ta-soczialno-gumanitarnyh-dysczyplin-2026-2027-2.pdf"
+  ]
+ },
+ {
+  "id": "t-protsenko-i-p:4:1410",
+  "teacher": "Проценко І.П.",
+  "full_name": "Проценко Іван Петрович",
+  "slug": "t-protsenko-i-p",
+  "aliases": [],
+  "day": "Четвер",
+  "day_num": 4,
+  "start": "14:10",
+  "end": "15:00",
+  "subjects": [
+   "Захист України",
+   "Професійна відповідальність правоохоронця",
+   "Правові основи детективної та оперативно-розшукової діяльності",
+   "Досудове розслідування кримінальних правопорушень"
+  ],
+  "commissions": [
+   "ЦК загальноосвітніх та соціально-гуманітарних дисциплін",
+   "ЦК права та правоохоронної діяльності"
+  ],
+  "sources": [
+   "https://nlu.edu.ua/wp-content/uploads/2026/11/grafik-konsultaczij-czk-zagalnoosvitnih-ta-soczialno-gumanitarnyh-dysczyplin-2026-2027-2.pdf",
+   "https://nlu.edu.ua/wp-content/uploads/2026/11/grafik-konsultaczij-czk-prava-ta-pravoohoronnoyi-diyalnosti-2026-2027.pdf"
+  ]
+ },
+ {
+  "id": "t-kharchenko-a-v:4:1410",
+  "teacher": "Харченко А.В.",
+  "full_name": "Харченко Аліна Володимирівна",
+  "slug": "t-kharchenko-a-v",
+  "aliases": [],
+  "day": "Четвер",
+  "day_num": 4,
+  "start": "14:10",
+  "end": "15:00",
+  "subjects": [
+   "Математика"
+  ],
+  "commissions": [
+   "ЦК загальноосвітніх та соціально-гуманітарних дисциплін"
+  ],
+  "sources": [
+   "https://nlu.edu.ua/wp-content/uploads/2026/11/grafik-konsultaczij-czk-zagalnoosvitnih-ta-soczialno-gumanitarnyh-dysczyplin-2026-2027-2.pdf"
+  ]
+ },
+ {
+  "id": "t-prylipko-i-l:4:1410",
+  "teacher": "Приліпко І.Л.",
+  "full_name": "Приліпко Ірина Леонідівна",
+  "slug": "t-prylipko-i-l",
+  "aliases": [],
+  "day": "Четвер",
+  "day_num": 4,
+  "start": "14:10",
+  "end": "15:30",
+  "subjects": [
+   "Господарське право",
+   "Конкурентоспроможність бізнесу"
+  ],
+  "commissions": [
+   "ЦК права та правоохоронної діяльності"
+  ],
+  "sources": [
+   "https://nlu.edu.ua/wp-content/uploads/2026/11/grafik-konsultaczij-czk-prava-ta-pravoohoronnoyi-diyalnosti-2026-2027.pdf"
+  ]
+ },
+ {
+  "id": "t-sadovska-t-i:4:1410",
+  "teacher": "Садовська Т.І.",
+  "full_name": "Садовська Тетяна Ігорівна",
+  "slug": "t-sadovska-t-i",
+  "aliases": [],
+  "day": "Четвер",
+  "day_num": 4,
+  "start": "14:10",
+  "end": "15:30",
+  "subjects": [
+   "Сімейне право",
+   "Судові та правоохоронні органи України",
+   "Цивільне право (ПК-36-А)",
+   "Професійна етика юриста"
+  ],
+  "commissions": [
+   "ЦК права та правоохоронної діяльності"
+  ],
+  "sources": [
+   "https://nlu.edu.ua/wp-content/uploads/2026/11/grafik-konsultaczij-czk-prava-ta-pravoohoronnoyi-diyalnosti-2026-2027.pdf"
+  ]
+ },
+ {
+  "id": "t-trotska-v-v:4:1630",
+  "teacher": "Троцька В.В.",
+  "full_name": "Троцька Віта Василівна",
+  "slug": "t-trotska-v-v",
+  "aliases": [],
+  "day": "Четвер",
+  "day_num": 4,
+  "start": "16:30",
+  "end": "17:00",
+  "subjects": [
+   "Державне будівництво та місцеве самоврядування"
+  ],
+  "commissions": [
+   "ЦК права та правоохоронної діяльності"
+  ],
+  "sources": [
+   "https://nlu.edu.ua/wp-content/uploads/2026/11/grafik-konsultaczij-czk-prava-ta-pravoohoronnoyi-diyalnosti-2026-2027.pdf"
+  ]
+ },
+ {
+  "id": "t-trotska-v-v:4:1700",
+  "teacher": "Троцька В.В.",
+  "full_name": "Троцька Віта Василівна",
+  "slug": "t-trotska-v-v",
+  "aliases": [],
+  "day": "Четвер",
+  "day_num": 4,
+  "start": "17:00",
+  "end": "18:00",
+  "subjects": [
+   "Теорія та практика референтської діяльності"
+  ],
+  "commissions": [
+   "ЦК загальноосвітніх та соціально-гуманітарних дисциплін"
+  ],
+  "sources": [
+   "https://nlu.edu.ua/wp-content/uploads/2026/11/grafik-konsultaczij-czk-zagalnoosvitnih-ta-soczialno-gumanitarnyh-dysczyplin-2026-2027-2.pdf"
+  ]
+ },
+ {
+  "id": "t-hubanov-a-b:5:1410",
+  "teacher": "Губанов А.Б.",
+  "full_name": "Губанов Андрій Богданович",
+  "slug": "t-hubanov-a-b",
+  "aliases": [],
+  "day": "П'ятниця",
+  "day_num": 5,
+  "start": "14:10",
+  "end": "15:00",
+  "subjects": [
+   "Інформатика",
+   "Основи інформатики та обчислювальної техніки",
+   "Комп'ютерні технології"
+  ],
+  "commissions": [
+   "ЦК загальноосвітніх та соціально-гуманітарних дисциплін"
+  ],
+  "sources": [
+   "https://nlu.edu.ua/wp-content/uploads/2026/11/grafik-konsultaczij-czk-zagalnoosvitnih-ta-soczialno-gumanitarnyh-dysczyplin-2026-2027-2.pdf"
+  ]
+ },
+ {
+  "id": "t-taranenko-k-s:5:1410",
+  "teacher": "Тараненко К.С.",
+  "full_name": "Тараненко Крістіна Сергіївна",
+  "slug": "t-taranenko-k-s",
+  "aliases": [],
+  "day": "П'ятниця",
+  "day_num": 5,
+  "start": "14:10",
+  "end": "15:00",
+  "subjects": [
+   "Іноземна мова",
+   "Іноземна мова (за професійним спрямуванням)"
+  ],
+  "commissions": [
+   "ЦК загальноосвітніх та соціально-гуманітарних дисциплін"
+  ],
+  "sources": [
+   "https://nlu.edu.ua/wp-content/uploads/2026/11/grafik-konsultaczij-czk-zagalnoosvitnih-ta-soczialno-gumanitarnyh-dysczyplin-2026-2027-2.pdf"
+  ]
+ },
+ {
+  "id": "t-solokha-m-m:5:1410",
+  "teacher": "Солоха М.М.",
+  "full_name": "Солоха Максим Миколайович",
+  "slug": "t-solokha-m-m",
+  "aliases": [],
+  "day": "П'ятниця",
+  "day_num": 5,
+  "start": "14:10",
+  "end": "15:30",
+  "subjects": [
+   "Міжнародний захист прав людини",
+   "Міжнародне право",
+   "Правова робота на підприємстві, установі, організації"
+  ],
+  "commissions": [
+   "ЦК права та правоохоронної діяльності"
+  ],
+  "sources": [
+   "https://nlu.edu.ua/wp-content/uploads/2026/11/grafik-konsultaczij-czk-prava-ta-pravoohoronnoyi-diyalnosti-2026-2027.pdf"
+  ]
+ },
+ {
+  "id": "t-moroz-s-h:5:1600",
+  "teacher": "Мороз С.Г.",
+  "full_name": "Мороз Світлана Геннадіївна",
+  "slug": "t-moroz-s-h",
+  "aliases": [],
+  "day": "П'ятниця",
+  "day_num": 5,
+  "start": "16:00",
+  "end": "17:00",
+  "subjects": [
+   "Економічна теорія",
+   "Криміналістика",
+   "Криміналістичні експертизи"
+  ],
+  "commissions": [
+   "ЦК загальноосвітніх та соціально-гуманітарних дисциплін",
+   "ЦК права та правоохоронної діяльності"
+  ],
+  "sources": [
+   "https://nlu.edu.ua/wp-content/uploads/2026/11/grafik-konsultaczij-czk-zagalnoosvitnih-ta-soczialno-gumanitarnyh-dysczyplin-2026-2027-2.pdf",
+   "https://nlu.edu.ua/wp-content/uploads/2026/11/grafik-konsultaczij-czk-prava-ta-pravoohoronnoyi-diyalnosti-2026-2027.pdf"
+  ]
+ }
+]
