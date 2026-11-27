@@ -1,3 +1,10 @@
 {
- "issues": {}
+ "issues": {
+  "parse:rozklad-2-kurs-30.11-25": {
+   "text": "Не вдалося розібрати PDF «РОЗКЛАД 2 курс 30.11-25.12»: ValueError: не знайдено жодної пари.",
+   "url": "https://nlu.edu.ua/wp-content/uploads/2026/11/rozklad-2-kurs-30.11-25.pdf",
+   "since": "2026-11-27T11:17+02:00",
+   "alerted": "2026-11-27T11:17+02:00"
+  }
+ }
 }
