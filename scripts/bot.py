@@ -216,7 +216,7 @@ def parse_pdf(kind, pdf, title, old_data=None):
 
 
 def _strip_doubt(it):
-    return {k: v for k, v in it.items() if k != "doubt"}
+    return {k: v for k, v in it.items() if k not in ("doubt", "choice")}
 
 
 def _items_signature(data):
@@ -338,7 +338,7 @@ def resolutions_path():
 
 
 def sync_resolutions():
-    """Підтягує відповіді адміна з KV воркера і дописує в data/resolutions.json."""
+    """Підтягує відповіді адміна з KV воркера в data/resolutions.json і дописує локальні рішення у KV."""
     res = jload(resolutions_path(), {})
     if not TOKEN:
         return res
@@ -346,14 +346,20 @@ def sync_resolutions():
     if not w.url:
         return res
     kv = w.get("resolutions")
-    if isinstance(kv, dict) and kv:
-        changed = False
-        for did, val in kv.items():
-            if did not in res or (val.get("at", "") > (res[did] or {}).get("at", "")):
-                res[did] = val
-                changed = True
-        if changed:
-            jsave(resolutions_path(), res)
+    if not isinstance(kv, dict):
+        return res
+    changed, push_kv = False, False
+    for did, val in kv.items():
+        if did not in res or (val.get("at", "") > (res[did] or {}).get("at", "")):
+            res[did] = val
+            changed = True
+    for did, val in res.items():
+        if did not in kv or (val.get("at", "") > (kv[did] or {}).get("at", "")):
+            push_kv = True
+    if changed:
+        jsave(resolutions_path(), res)
+    if push_kv:
+        w.put("resolutions", res, 180 * 86400)
     return res
 
 
@@ -365,7 +371,8 @@ def _apply_resolutions(items, resolutions):
         did = it.get("doubt")
         if did and did in resolutions:
             keep = resolutions[did].get("keep")
-            if keep != "all" and (not isinstance(keep, list) or it["subject"] not in keep):
+            label = f"{it.get('type', '')} {it['subject']}".strip()
+            if keep != "all" and (not isinstance(keep, list) or (label not in keep and it["subject"] not in keep)):
                 continue
             it = {k: v for k, v in it.items() if k != "doubt"}
         out.append(it)
@@ -520,6 +527,8 @@ def lesson_line(it):
     extra = []
     if it.get("subgroup"):
         extra.append(f"{it['subgroup']} підгр.")
+    elif it.get("choice"):
+        extra.append("за вибором")
     if it.get("teacher"):
         extra.append(escape(it["teacher"]))
     if it.get("online"):
@@ -547,7 +556,8 @@ def fmt_day(g, d, title, sg=0):
     if any(i.get("changed") or i.get("cancelled") for i in day["items"]):
         lines.append("\n🔄 — заміна з «Змін до розкладу»")
     if live:
-        lines.append(f"\n🏁 {live[0]['start']}–{live[-1]['end']} · {len(live)} {plural(len(live))}")
+        npairs = len({i["pair"] for i in live})
+        lines.append(f"\n🏁 {live[0]['start']}–{live[-1]['end']} · {npairs} {plural(npairs)}")
     return "\n".join(lines)
 
 
@@ -873,6 +883,8 @@ def report(problems, unchecked=(), send=True):
             o = {k: v for k, v in o.items() if k != "resolved"}
         # текст першої помилки не переписуємо щоразу (тайм-аут/обрив чергуються) — інакше коміт data/ щогодини
         st = {"text": o.get("text") or p["text"], "url": p.get("url", ""), "since": o.get("since") or stamp(), "alerted": o.get("alerted")}
+        if o.get("msgs"):
+            st["msgs"] = o["msgs"]
         if p["id"].startswith("doubt:"):
             if not st["alerted"]:
                 fresh_doubts.append((st, p.get("doubt")))
@@ -924,6 +936,10 @@ def report(problems, unchecked=(), send=True):
     if delivered:
         for s in fresh + remind:
             s["alerted"] = stamp()
+        for pid, o in fixed:
+            if pid.startswith("doubt:") and o.get("msgs"):
+                for cid, mid in o["msgs"].items():
+                    tg("editMessageReplyMarkup", {"chat_id": cid, "message_id": mid, "reply_markup": {"inline_keyboard": []}})
     elif tried:  # про відновлення не вдалося повідомити — лишаємо запис, спробуємо наступного разу
         for pid, o in fixed:
             cur[pid] = {**o, "resolved": True}
@@ -945,14 +961,20 @@ def report(problems, unchecked=(), send=True):
                 for i, o in enumerate(db.get("options") or [])]
         btns.append([{"text": "Обидва — підгрупи", "callback_data": f"rs:{did}:all"}])
         if send and TOKEN and ADMINS:
-            d_ok = False
+            d_ok, msgs = False, dict(st.get("msgs") or {})
             for c in ADMINS:
                 r = tg("sendMessage", {"chat_id": c, "text": q_text, "parse_mode": "HTML",
                                        "reply_markup": {"inline_keyboard": btns},
                                        "link_preview_options": {"is_disabled": True}})
-                d_ok = d_ok or bool(r.get("ok"))
+                if r.get("ok"):
+                    d_ok = True
+                    mid = (r.get("result") or {}).get("message_id")
+                    if mid:
+                        msgs[str(c)] = mid
             if d_ok:
                 st["alerted"] = stamp()
+            if msgs:
+                st["msgs"] = msgs
         else:
             log("Сумнів у PDF (без надсилання):\n" + re.sub(r"<[^>]+>", "", q_text))
     new = {"issues": cur}

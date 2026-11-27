@@ -1,5 +1,5 @@
 /* Service worker: працює офлайн (останній завантажений розклад), дані — спершу з мережі */
-const CACHE = "rozklad-v4";
+const CACHE = "rozklad-v5";
 const SHELL = ["./", "index.html", "style.css", "app.js", "manifest.webmanifest", "icon.svg"];
 
 self.addEventListener("install", (e) => {

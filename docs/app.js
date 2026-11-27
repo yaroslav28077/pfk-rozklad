@@ -94,7 +94,7 @@ function lessonHTML(it, state, dayUrl = "") {
   if (it.cancelled) cls.push("cancelled");
   const chip = it.type ? `<span class="chip ${it.type === "Лк" ? "lk" : "pr"}">${it.type === "Лк" ? "Лекція" : it.type === "Пр" ? "Практичне" : esc(it.type)}</span>` : "";
   const room = it.room ? (/^\d+$/.test(it.room) ? `ауд. ${esc(it.room)}` : esc(it.room)) : "";
-  const info = [it.subgroup ? `${it.subgroup} підгр.` : "", it.teacher ? esc(it.teacher) : "", it.online ? "онлайн" : room].filter(Boolean).map((x) => `<span>${x}</span>`).join("");
+  const info = [it.subgroup ? `${it.subgroup} підгр.` : it.choice ? "за вибором" : "", it.teacher ? esc(it.teacher) : "", it.online ? "онлайн" : room].filter(Boolean).map((x) => `<span>${x}</span>`).join("");
   let note = "";
   if (it.cancelled) note = `<div class="note">Вікно — пари немає</div>`;
   else if (it.changed) note = `<div class="note">Заміна${it.was ? ` · було: ${esc(it.was)}` : ""}</div>`;
@@ -182,7 +182,8 @@ function render() {
     const d = findDay(iso);
     const L = live(d);
     const title = iso === addDays(today, 1) ? "Завтра" : "Наступний навчальний день";
-    const summary = L.length ? `${L.length} ${L.length === 1 ? "пара" : L.length < 5 ? "пари" : "пар"} · ${L[0].start}–${L[L.length - 1].end}` : "";
+    const nP = new Set(L.map((x) => x.pair)).size;
+    const summary = nP ? `${nP} ${nP === 1 ? "пара" : nP < 5 ? "пари" : "пар"} · ${L[0].start}–${L[L.length - 1].end}` : "";
     const pdfLnk = d.url ? ` · <a href="${esc(d.url)}" target="_blank" rel="noopener">PDF ↗</a>` : "";
     v.innerHTML = `<div class="section-title"><h2>${title}</h2><span>${DAYS[dow(iso)]}, ${ddmm(iso)}${pdfLnk}</span></div>` +
       (summary ? `<p class="muted" style="margin:0 2px 10px">${summary}</p>` : "") + dayListHTML(d, false);
@@ -195,7 +196,7 @@ function render() {
     const pdfLnk = wd.url ? ` · <a href="${esc(wd.url)}" target="_blank" rel="noopener">PDF ↗</a>` : "";
     v.innerHTML = `<div class="section-title"><h2>Тиждень</h2><span>${ddmm(week[0])}–${ddmm(week[4])}</span></div>
       <div class="days" role="tablist">${week.map((iso) => `<button role="tab" aria-selected="${iso === WEEK_SEL}" aria-label="${DAYS[dow(iso)]}, ${ddmm(iso)}" data-day="${iso}" class="${iso === WEEK_SEL ? "active" : ""} ${iso === today ? "today" : ""}">${SHORT[dow(iso)]}<small>${ddmm(iso)}</small></button>`).join("")}</div>
-      <div class="section-title"><h2>${DAYS[dow(WEEK_SEL)]}</h2><span>${live(wd).length} пар${pdfLnk}</span></div>` + dayListHTML(wd, WEEK_SEL === today);
+      <div class="section-title"><h2>${DAYS[dow(WEEK_SEL)]}</h2><span>${new Set(live(wd).map((x) => x.pair)).size} пар${pdfLnk}</span></div>` + dayListHTML(wd, WEEK_SEL === today);
     v.querySelectorAll("[data-day]").forEach((b) => b.addEventListener("click", () => { WEEK_SEL = b.dataset.day; render(); }));
   } else if (TAB === "changes") {
     const rows = SITE.changes.filter((z) => z.date >= addDays(today, -7)).sort((a, b) => (a.date + a.pair).localeCompare(b.date + b.pair));

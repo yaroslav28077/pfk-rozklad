@@ -100,7 +100,7 @@ const hasSubgroups = (g) => Object.values(g.days).some((d) => d.items.some((x) =
 function lessonLine(it) {
   const n = NUM[it.pair] || it.pair + ".";
   if (it.cancelled) return `${n} <s>${esc(it.subject)}</s> — <b>вікно</b>`;
-  const extra = [it.subgroup ? `${it.subgroup} підгр.` : "", esc(it.teacher || ""), it.online ? "онлайн" : ""].filter(Boolean);
+  const extra = [it.subgroup ? `${it.subgroup} підгр.` : it.choice ? "за вибором" : "", esc(it.teacher || ""), it.online ? "онлайн" : ""].filter(Boolean);
   return `${n} ${it.start}–${it.end}  <b>${esc(((it.type || "") + " " + it.subject).trim())}</b>${it.changed ? " 🔄" : ""}` + (extra.length ? `\n      <i>${extra.join(", ")}</i>` : "");
 }
 
@@ -113,7 +113,10 @@ function fmtDay(g, iso, title, sg = 0) {
   const live = day.items.filter((x) => !x.cancelled);
   const out = [head, "", ...day.items.map(lessonLine)];
   if (day.items.some((x) => x.changed || x.cancelled)) out.push("\n🔄 — заміна з «Змін до розкладу»");
-  if (live.length) out.push(`\n🏁 ${live[0].start}–${live[live.length - 1].end} · ${live.length} ${plural(live.length)}`);
+  if (live.length) {
+    const nPairs = new Set(live.map((x) => x.pair)).size;
+    out.push(`\n🏁 ${live[0].start}–${live[live.length - 1].end} · ${nPairs} ${plural(nPairs)}`);
+  }
   return out.join("\n");
 }
 
@@ -310,7 +313,8 @@ async function onUpdate(env, upd) {
       }
       const [, did, choice] = d.split(":");
       const doubt = did ? await env.USERS.get("s:doubt:" + did, "json").catch(() => null) : null;
-      const keep = choice === "all" ? "all" : doubt?.options?.[+choice]?.subject ? [doubt.options[+choice].subject] : null;
+      const opt = doubt?.options?.[+choice];
+      const keep = choice === "all" ? "all" : opt?.subject ? [((opt.type || "") + " " + opt.subject).trim()] : null;
       if (!did || !keep) {
         return tg(env, "answerCallbackQuery", { callback_query_id: cb.id, text: "Питання застаріло або варіант не знайдено" });
       }

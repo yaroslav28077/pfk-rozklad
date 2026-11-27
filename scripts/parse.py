@@ -12,7 +12,7 @@ import pymupdf
 
 from pdfgrid import cells
 
-VERSION = 2
+VERSION = 3
 GROUP_RE = re.compile(r"[А-ЯІЇЄҐ]{1,5}-\d{2}[А-ЯІЇЄҐа-яіїєґ\-]*")
 TIME_RE = re.compile(r"(\d{1,2})[:.](\d{2})\s*[-–—]\s*(\d{1,2})[:.](\d{2})")
 DAYS = {"ПОНЕДІЛОК": 0, "ВІВТОРОК": 1, "СЕРЕДА": 2, "ЧЕТВЕР": 3, "П'ЯТНИЦЯ": 4, "СУБОТА": 5}
@@ -131,6 +131,11 @@ def find_doubts(items, lessons=None):
             opt = (it.get("type", ""), it["subject"], it.get("teacher", ""))
             opts_map[opt] = {"type": opt[0], "subject": opt[1], "teacher": opt[2]}
         if not is_merged and len(opts_map) < 2:
+            continue
+        if (not is_merged and all(it.get("choice") for it in slot_items)
+                and len({it["subject"] for it in slot_items}) == len(slot_items)
+                and all(it.get("teacher") for it in slot_items)
+                and len({it["teacher"] for it in slot_items}) == len(slot_items)):
             continue
         kind = "merged" if is_merged else "conflict"
         opts = sorted(opts_map.values(), key=lambda o: (o["type"], o["subject"], o["teacher"]))
@@ -269,37 +274,67 @@ def parse_schedule(pdf_bytes, title=""):
                             gx = (g.rect.x0 + g.rect.x1) / 2
                             sub = 1 if cx < gx else 2
                         is_stream = len(matched_groups) > 1 or c.rect.x0 < g.rect.x0 - 6 or c.rect.x1 > g.rect.x1 + 6
+                    cell_les = []
+                    span = (c.c1 - c.c0 + 1) if not is_continuation else round(c.rect.width, 1)
                     for alt in _alternatives(c.text):
                         norm_alt = re.sub(r"\b(Лк|Пр|Лаб|Сем)\.?\s+\1\.?\b", r"\1.", _apos(alt), flags=re.I)
                         les = parse_lesson(norm_alt, d0.year)
                         if len(LESSON_MARK_RE.findall(norm_alt)) >= 2:
                             les["_merged"] = True
+                        has_dates = bool(les.get("dates") or les.get("from") or les.get("to"))
                         les.update({"group": g.text.replace(" ", ""), "day": b["day"], "pair": b["pair"],
-                                    "start": b["start"], "end": b["end"], "row": c.r0 - b["r0"]})
+                                    "start": b["start"], "end": b["end"], "row": c.r0 - b["r0"],
+                                    "_span": span, "_has_dates": has_dates})
                         if sub:
                             les["subgroup"] = sub
                         if b["online"]:
                             les["online"] = True
                         if is_stream:
                             les["stream"] = True  # спільна пара кількох груп (потік)
-                        lessons.append(les)
+                        cell_les.append(les)
+                    if len(cell_les) >= 2 and not any(x.get("_merged") for x in cell_les):
+                        by_dates = {}
+                        for x in cell_les:
+                            dk = (x.get("from"), x.get("to"), tuple(x.get("dates") or ()))
+                            by_dates.setdefault(dk, []).append(x)
+                        for grp_les in by_dates.values():
+                            if (len(grp_les) >= 2
+                                    and len({x["subject"] for x in grp_les}) == len(grp_les)
+                                    and all(x.get("teacher") for x in grp_les)
+                                    and len({x["teacher"] for x in grp_les}) == len(grp_les)):
+                                for x in grp_les:
+                                    x["choice"] = True
+                    lessons.extend(cell_les)
     if not groups:
         raise ValueError("не знайдено заголовок із назвами груп")
     # розгортаємо на конкретні дати
     items = []
     d = d0
     while d <= d1:
+        iso = d.isoformat()
+        active = []
         for les in lessons:
             if les["day"] != d.weekday():
                 continue
-            iso = d.isoformat()
             if les.get("dates") and iso not in les["dates"]:
                 continue
             if les.get("from") and iso < les["from"] or les.get("to") and iso > les["to"]:
                 continue
-            it = {k: v for k, v in les.items() if k not in ("day", "dates", "from", "to", "row")}
-            it["date"] = iso
-            items.append(it)
+            active.append(les)
+        by_gp = {}
+        for les in active:
+            by_gp.setdefault((les["group"], les["pair"]), []).append(les)
+        for gp_les in by_gp.values():
+            dated = [x for x in gp_les if x.get("_has_dates")]
+            for les in gp_les:
+                # У поділеній парі вузька клітинка з явними датами уточнює ширшу потокову без дат
+                if (les.get("stream") and not les.get("_has_dates")
+                        and any(s["row"] != les["row"] and les["_span"] > s["_span"] for s in dated)):
+                    continue
+                it = {k: v for k, v in les.items()
+                      if k not in ("day", "dates", "from", "to", "row", "_span", "_has_dates")}
+                it["date"] = iso
+                items.append(it)
         d += timedelta(days=1)
     uniq_items = {}
     for it in items:
