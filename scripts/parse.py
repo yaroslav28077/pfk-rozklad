@@ -3,6 +3,8 @@
 parse_schedule(pdf) — «РОЗКЛАД ЗАНЯТЬ … курсу» → групи та пари на кожну дату.
 parse_changes(pdf)  — «ЗМІНИ ДО РОЗКЛАДУ» → список замін.
 """
+import hashlib
+import json
 import re
 from datetime import date, timedelta
 
@@ -10,19 +12,21 @@ import pymupdf
 
 from pdfgrid import cells
 
+VERSION = 2
 GROUP_RE = re.compile(r"[А-ЯІЇЄҐ]{1,5}-\d{2}[А-ЯІЇЄҐа-яіїєґ\-]*")
 TIME_RE = re.compile(r"(\d{1,2})[:.](\d{2})\s*[-–—]\s*(\d{1,2})[:.](\d{2})")
 DAYS = {"ПОНЕДІЛОК": 0, "ВІВТОРОК": 1, "СЕРЕДА": 2, "ЧЕТВЕР": 3, "П'ЯТНИЦЯ": 4, "СУБОТА": 5}
 MONTHS = {"січ": 1, "лют": 2, "бер": 3, "кві": 4, "тра": 5, "чер": 6, "лип": 7, "сер": 8, "вер": 9, "жов": 10, "лис": 11, "гру": 12}
 ROMAN = {"I": 1, "II": 2, "III": 3, "IV": 4}
 KINDS = {"лк": "Лк", "пр": "Пр", "лаб": "Лаб", "сем": "Сем"}
+LESSON_MARK_RE = re.compile(r"(?:^|(?<=\s))(?:Лк|Пр|Лаб|Сем)\.(?=\s|[А-ЯІЇЄҐ])")
 TEACHER_RE = re.compile(
-    r"(?:,\s*|\s+)((?:(?:[а-яіїє]{1,3}\.){1,4}\s*)?[А-ЯІЇЄҐ][а-яіїєґ'’ʼ\-]+\s+[А-ЯІЇЄҐ]\.\s?[А-ЯІЇЄҐ]\.?)\s*$")
+    r"(?:,\s*|\s+)((?:(?:[а-яіїє]{1,3}\.){1,4}\s*)?[А-ЯІЇЄҐ][а-яіїєґ'’ʼ\-]+,?\s+[А-ЯІЇЄҐ]\.\s?[А-ЯІЇЄҐ]\.?)\s*$")
 DM = r"(\d{1,2})\.(\d{2})(?!\.\d)"
 
 
 def _apos(s):
-    return s.replace("’", "'").replace("ʼ", "'").replace("`", "'")
+    return s.replace("’", "'").replace("ʼ", "'").replace("`", "'").replace("\xad", "-")
 
 
 def _norm(s):
@@ -45,6 +49,28 @@ def _period(text):
         return None, None
     g = list(map(int, m.groups()))
     return date(g[2], g[1], g[0]), date(g[5], g[4], g[3])
+
+
+def _resolve_period(full, title):
+    d0, d1 = _period(full)
+    if not d0:
+        d0, d1 = _period(title.replace("-", " - "))
+    if not d0:
+        return None, None
+    if d1 < d0:
+        # У шапці бувають описки (напр. «з 30.11.2026 по 25.11.2026» замість 25.12): звіряємо із заголовком або зсуваємо на місяць уперед.
+        tm = re.search(r"(\d{1,2})\.(\d{2})\s*[-–—]\s*(\d{1,2})\.(\d{2})", title or "")
+        if tm:
+            td0, tm0, td1, tm1 = map(int, tm.groups())
+            if (td0, tm0) == (d0.day, d0.month):
+                y1 = d0.year + (1 if tm1 < tm0 else 0)
+                cand = date(y1, tm1, td1)
+                if cand >= d0:
+                    return d0, cand
+        if d1.month == d0.month and d1.day < d0.day:
+            y1, m1 = (d0.year + 1, 1) if d0.month == 12 else (d0.year, d0.month + 1)
+            return d0, date(y1, m1, d1.day)
+    return d0, d1
 
 
 def _course(text):
@@ -77,14 +103,55 @@ def parse_lesson(text, year):
         t = re.sub(rf"\(?\s*{DM}(?:\s*[,;]\s*{DM})*\s*\)?", "", t)
     t = re.sub(r"\(\s*[,;\s]*\)", "", t)
     t = " ".join(t.split()).strip(" ,;/-")
+    t = re.sub(r"\b(Лк|Пр|Лаб|Сем)\.?\s+\1\.?\b", r"\1.", t, flags=re.I)
     m = re.match(r"^(Лк|Пр|Лаб|Сем)\b\.?\s*", t, re.I)
     if m:
         out["type"] = KINDS[m.group(1).lower()]; t = t[m.end():]
     m = TEACHER_RE.search(t)
     if m and m.start() > 0:
-        out["teacher"] = m.group(1).strip(); t = t[:m.start()]
+        teacher = re.sub(r"([А-ЯІЇЄҐа-яіїєґ'’ʼ\-]),\s*([А-ЯІЇЄҐ]\.)", r"\1 \2", m.group(1).strip())
+        out["teacher"] = " ".join(teacher.split())
+        t = t[:m.start()]
     out["subject"] = t.strip(" ,;.") or text.strip()
     return out
+
+
+def find_doubts(items, lessons=None):
+    """Виявляє конфлікти (кілька занять на ту саму пару) і нерозділені клітинки (`merged`), позначає `doubt`."""
+    slots = {}
+    for it in items:
+        key = (it["group"], it["date"], it["pair"], it.get("subgroup", 0))
+        slots.setdefault(key, []).append(it)
+    grouped = {}
+    for key, slot_items in slots.items():
+        grp, iso, pair, _ = key
+        is_merged = any(it.get("_merged") for it in slot_items)
+        opts_map = {}
+        for it in slot_items:
+            opt = (it.get("type", ""), it["subject"], it.get("teacher", ""))
+            opts_map[opt] = {"type": opt[0], "subject": opt[1], "teacher": opt[2]}
+        if not is_merged and len(opts_map) < 2:
+            continue
+        kind = "merged" if is_merged else "conflict"
+        opts = sorted(opts_map.values(), key=lambda o: (o["type"], o["subject"], o["teacher"]))
+        sig = (kind, pair, tuple((o["type"], o["subject"], o["teacher"]) for o in opts))
+        if sig not in grouped:
+            did = hashlib.sha1(json.dumps({"kind": kind, "pair": pair, "options": opts}, ensure_ascii=False, sort_keys=True).encode()).hexdigest()[:10]
+            grouped[sig] = {"id": did, "kind": kind, "pair": pair, "start": slot_items[0]["start"],
+                            "options": opts, "groups": set(), "dates": set(), "items": []}
+        grouped[sig]["groups"].add(grp)
+        grouped[sig]["dates"].add(iso)
+        grouped[sig]["items"].extend(slot_items)
+    for it in items:
+        it.pop("_merged", None)
+    doubts = []
+    for g in grouped.values():
+        for it in g["items"]:
+            it["doubt"] = g["id"]
+        doubts.append({"id": g["id"], "kind": g["kind"], "pair": g["pair"], "start": g["start"],
+                       "options": g["options"], "groups": sorted(g["groups"]), "dates": sorted(g["dates"])})
+    doubts.sort(key=lambda d: (d["pair"], d["groups"][0], d["dates"][0]))
+    return doubts
 
 
 def _alternatives(text):
@@ -95,9 +162,7 @@ def _alternatives(text):
 def parse_schedule(pdf_bytes, title=""):
     doc = pymupdf.open(stream=pdf_bytes, filetype="pdf")
     full = " ".join(p.get_text() for p in doc)
-    d0, d1 = _period(full)
-    if not d0:
-        d0, d1 = _period(title.replace("-", " - "))
+    d0, d1 = _resolve_period(full, title)
     if not d0:
         raise ValueError("не знайдено період дії розкладу («з … по …»)")
     course = _course(full) or _course(title)
@@ -107,6 +172,8 @@ def parse_schedule(pdf_bytes, title=""):
         cs = [c for c in cells(page)]
         if not cs:
             continue
+        for c in cs:
+            c.text = c.text.replace("\xad", "-")
         # рядок заголовка з назвами груп
         heads = {}
         for c in cs:
@@ -203,7 +270,10 @@ def parse_schedule(pdf_bytes, title=""):
                             sub = 1 if cx < gx else 2
                         is_stream = len(matched_groups) > 1 or c.rect.x0 < g.rect.x0 - 6 or c.rect.x1 > g.rect.x1 + 6
                     for alt in _alternatives(c.text):
-                        les = parse_lesson(alt, d0.year)
+                        norm_alt = re.sub(r"\b(Лк|Пр|Лаб|Сем)\.?\s+\1\.?\b", r"\1.", _apos(alt), flags=re.I)
+                        les = parse_lesson(norm_alt, d0.year)
+                        if len(LESSON_MARK_RE.findall(norm_alt)) >= 2:
+                            les["_merged"] = True
                         les.update({"group": g.text.replace(" ", ""), "day": b["day"], "pair": b["pair"],
                                     "start": b["start"], "end": b["end"], "row": c.r0 - b["r0"]})
                         if sub:
@@ -231,9 +301,17 @@ def parse_schedule(pdf_bytes, title=""):
             it["date"] = iso
             items.append(it)
         d += timedelta(days=1)
-    items.sort(key=lambda x: (x["group"], x["date"], x["pair"], x.get("subgroup", 0)))
+    uniq_items = {}
+    for it in items:
+        uk = (it["group"], it["date"], it["pair"], it.get("subgroup", 0), it.get("type", ""), it["subject"], it.get("teacher", ""))
+        if uk not in uniq_items:
+            uniq_items[uk] = it
+        elif it.get("_merged"):
+            uniq_items[uk]["_merged"] = True
+    items = sorted(uniq_items.values(), key=lambda x: (x["group"], x["date"], x["pair"], x.get("subgroup", 0)))
+    doubts = find_doubts(items, lessons)
     return {"from": d0.isoformat(), "to": d1.isoformat(), "course": course,
-            "groups": list(groups.values()), "items": items}
+            "groups": list(groups.values()), "items": items, "doubts": doubts}
 
 
 def _parse_day(s, year):
@@ -258,6 +336,8 @@ def parse_changes(pdf_bytes):
         cs = cells(page)
         if not cs:
             continue
+        for c in cs:
+            c.text = c.text.replace("\xad", "-")
         ncols = max(c.c1 for c in cs) + 1
         at = {}
         for c in cs:

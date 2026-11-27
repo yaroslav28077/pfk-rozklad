@@ -8,6 +8,8 @@ import numpy as np
 import pymupdf
 
 ZOOM = 4  # 288 dpi: лінії товщиною 0.5pt дають ≥2 px
+PARTIAL = (0.2, 0.85)
+MIN_SPLIT_ROW = 16
 
 
 class Cell:
@@ -58,22 +60,66 @@ def _mask(page):
     return a < 190  # тонкі лінії світліші (~120–160), сіра заливка (~220) — не лінія
 
 
+def _vprofile(m, x, y0, y1):
+    """Вертикальний профіль лінії в межах рядка [y0, y1] на позиції x."""
+    xi = int(round(x))
+    ya, yb = int(round(y0)) + 2, int(round(y1)) - 1
+    if yb <= ya:
+        return np.ones(0, dtype=bool)
+    return m[ya:yb, max(0, xi - 3):xi + 4].any(axis=1)
+
+
+def _implicit_splits(m, xs, ys):
+    """Шукає неповні вертикальні лінії (20–85% висоти від краю) і ділить рядок уявною межею."""
+    extra = []
+    min_gap = 4 * ZOOM
+    for i in range(len(ys) - 1):
+        y0, y1 = ys[i], ys[i + 1]
+        if (y1 - y0) / ZOOM <= MIN_SPLIT_ROW:
+            continue
+        ya = int(round(y0)) + 2
+        yb = int(round(y1)) - 1
+        h = yb - ya
+        if h <= min_gap:
+            continue
+        row_pts = []
+        for x in xs[1:-1]:
+            seg = _vprofile(m, x, y0, y1)
+            if not len(seg):
+                continue
+            mean = float(seg.mean())
+            if not (PARTIAL[0] <= mean <= PARTIAL[1]):
+                continue
+            idx = np.where(seg)[0]
+            first, last = int(idx[0]), int(idx[-1])
+            edge_tol = max(4, int(0.06 * h))
+            if first <= edge_tol and (last + 1) / h <= PARTIAL[1] and seg[:last + 1].mean() >= 0.8 and seg[last + 1:].mean() <= 0.05:
+                if h - 1 - last >= min_gap:
+                    row_pts.append(ya + last + 1)
+            elif h - 1 - last <= edge_tol and (h - first) / h <= PARTIAL[1] and seg[first:].mean() >= 0.8 and seg[:first].mean() <= 0.05:
+                if first >= min_gap:
+                    row_pts.append(ya + first)
+        if row_pts:
+            row_pts.sort()
+            for c0, c1 in _clusters(row_pts, gap=3 * ZOOM):
+                extra.append((c0 + c1) / 2)
+    return sorted(ys + extra)
+
+
 def cells(page):
-    """Список клітинок таблиці на сторінці (об'єднані клітинки — одна Cell)."""
+    """Список клітинок таблиці на сторінці (лише прямокутні клітинки)."""
     m = _mask(page)
     min_len = 4 * ZOOM
     ys = [(a + b) / 2 for a, b in _clusters(_long_runs(m, 1, min_len))]
     xs = [(a + b) / 2 for a, b in _clusters(_long_runs(m, 0, min_len))]
     if len(xs) < 3 or len(ys) < 3:
         return []
+    ys = _implicit_splits(m, xs, ys)
     nr, nc = len(ys) - 1, len(xs) - 1
 
-    def has_v(j, i):  # вертикальна лінія x=xs[j] між рядками i
-        x = int(round(xs[j])); y0, y1 = int(ys[i]) + 2, int(ys[i + 1]) - 1
-        if y1 <= y0:
-            return True
-        seg = m[y0:y1, max(0, x - 3):x + 4].any(axis=1)
-        return seg.mean() > 0.6
+    def has_v(j, i):  # вертикальна лінія x=xs[j] в рядку i
+        seg = _vprofile(m, xs[j], ys[i], ys[i + 1])
+        return True if not len(seg) else seg.mean() > 0.6
 
     def has_h(i, j):  # горизонтальна лінія y=ys[i] між стовпцями j
         y = int(round(ys[i])); x0, x1 = int(xs[j]) + 2, int(xs[j + 1]) - 1
@@ -82,32 +128,27 @@ def cells(page):
         seg = m[max(0, y - 3):y + 4, x0:x1].any(axis=0)
         return seg.mean() > 0.6
 
-    parent = list(range(nr * nc))
-
-    def find(a):
-        while parent[a] != a:
-            parent[a] = parent[parent[a]]; a = parent[a]
-        return a
-
-    def union(a, b):
-        parent[find(a)] = find(b)
-
+    out = []
+    prev_row = {}
     for i in range(nr):
+        cur_row = {}
+        c0 = 0
         for j in range(nc):
             if j + 1 < nc and not has_v(j + 1, i):
-                union(i * nc + j, i * nc + j + 1)
-            if i + 1 < nr and not has_h(i + 1, j):
-                union(i * nc + j, (i + 1) * nc + j)
-    groups = {}
-    for i in range(nr):
-        for j in range(nc):
-            groups.setdefault(find(i * nc + j), []).append((i, j))
-    out = []
-    for atoms in groups.values():
-        r0, r1 = min(a[0] for a in atoms), max(a[0] for a in atoms)
-        c0, c1 = min(a[1] for a in atoms), max(a[1] for a in atoms)
-        rect = pymupdf.Rect(xs[c0] / ZOOM, ys[r0] / ZOOM, xs[c1 + 1] / ZOOM, ys[r1 + 1] / ZOOM)
-        out.append(Cell(r0, r1, c0, c1, rect))
+                continue
+            c1 = j
+            above = prev_row.get((c0, c1))
+            if above is not None and not any(has_h(i, k) for k in range(c0, c1 + 1)):
+                above.r1 = i
+                above.rect = pymupdf.Rect(xs[c0] / ZOOM, ys[above.r0] / ZOOM, xs[c1 + 1] / ZOOM, ys[i + 1] / ZOOM)
+                cur_row[(c0, c1)] = above
+            else:
+                rect = pymupdf.Rect(xs[c0] / ZOOM, ys[i] / ZOOM, xs[c1 + 1] / ZOOM, ys[i + 1] / ZOOM)
+                c = Cell(i, i, c0, c1, rect)
+                out.append(c)
+                cur_row[(c0, c1)] = c
+            c0 = j + 1
+        prev_row = cur_row
     # текст: кожне слово — у клітинку, де його центр
     words = page.get_text("words")
     buckets = {id(c): [] for c in out}
