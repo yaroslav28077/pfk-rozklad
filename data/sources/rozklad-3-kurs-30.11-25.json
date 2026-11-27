@@ -4,8 +4,9 @@
  "url": "https://nlu.edu.ua/wp-content/uploads/2026/11/rozklad-3-kurs-30.11-25.pdf",
  "kind": "schedule",
  "sha256": "f4998f724e0ff99f00ee98a93009d91db84fd6cd412f8996200ed87868317c31",
+ "parser": 2,
  "first_seen": "2026-11-27T11:16+02:00",
- "updated": "2026-11-27T11:16+02:00",
+ "updated": "2026-11-27T13:48+02:00",
  "data": {
   "from": "2026-11-30",
   "to": "2026-12-25",
@@ -2094,6 +2095,7 @@
     "end": "09:20",
     "date": "2026-12-10"
    }
-  ]
+  ],
+  "doubts": []
  }
 }
