@@ -193,7 +193,7 @@ async function getUser(env, id) {
 }
 const bit = (v) => (v ? 1 : 0);
 const saveUser = (env, id, u) => env.USERS.put("u:" + id, "", { metadata: {
-  g: u.g, m: bit(u.m), e: bit(u.e), c: bit(u.c), w: bit(u.w), s: bit(u.s), sg: +u.sg || 0, mh: +u.mh || DEFAULTS.mh, eh: +u.eh || DEFAULTS.eh, ...(u.mv ? { mv: +u.mv } : {}) } });
+  g: u.g, m: bit(u.m), e: bit(u.e), c: bit(u.c), w: bit(u.w), s: bit(u.s), sg: +u.sg || 0, mh: +u.mh || DEFAULTS.mh, eh: +u.eh || DEFAULTS.eh, ...(u.mv ? { mv: +u.mv } : {}), ...(u.at ? { at: String(u.at) } : {}) } });
 // підгрупа: показуємо спільні пари і пари своєї підгрупи (для викладачів підгруп немає)
 const mine = (items, sg) => (sg ? items.filter((x) => !x.subgroup || x.subgroup === sg) : items);
 const hasSubgroups = (g) => g?.kind !== "teacher" && Object.values(g.days).some((d) => d.items.some((x) => x.subgroup));
@@ -491,6 +491,7 @@ function keyFromText(t) {
   if (t.startsWith("/week") || t.includes("тижд")) return "week";
   if (t.startsWith("/consult") || t.includes("відпрац") || t.includes("консультац")) return "consult";
   if (t.startsWith("/changes") || t.includes("замін")) return "changes";
+  if (t.startsWith("/stats") || t === "/stat") return "stats";
   return null;
 }
 
@@ -505,6 +506,151 @@ function view(env, g, key, sg = 0) {
   }
   if (key === "changes") return [fmtChanges(g), backKb(env, g)];
   return null;
+}
+
+async function getAdmins(env, hbCached) {
+  const hb = hbCached !== undefined ? hbCached : await env.USERS.get("hb", "json").catch(() => null);
+  const admins = new Set([
+    ...String(env.TELEGRAM_CHAT_ID || "").split(",").map((s) => s.trim()).filter(Boolean),
+    ...((hb?.admins || []).map(String)),
+  ]);
+  return { admins, hb };
+}
+
+async function countConsultSubs(env) {
+  let count = 0;
+  let cursor;
+  do {
+    const r = await env.USERS.list({ prefix: "cs:", cursor });
+    count += r.keys.length;
+    cursor = r.list_complete ? null : r.cursor;
+  } while (cursor);
+  return count;
+}
+
+function statsView(site, users, csCount, hb, tab = "main", nowMs = Date.now()) {
+  const idx = site.index || {};
+  const today = kyivISO(new Date(nowMs));
+  const total = users.length;
+  const privateUsers = users.filter((u) => Number(u.id) > 0);
+  const groupChats = users.filter((u) => Number(u.id) < 0);
+  const todayNew = users.filter((u) => u.at === today).length;
+  const newMenuCount = privateUsers.filter((u) => (u.mv || 0) >= MENU_VER).length;
+
+  let studentCount = 0;
+  let teacherUsers = 0;
+  const courseCounts = new Map();
+  const groupCounts = new Map();
+  const teacherCounts = new Map();
+  const morningHours = new Map();
+  const eveningHours = new Map();
+  let morningOn = 0, eveningOn = 0, changesOn = 0, weekOn = 0, silentOn = 0;
+
+  for (const u of users) {
+    if (u.m) {
+      morningOn++;
+      const mh = +u.mh || DEFAULTS.mh;
+      morningHours.set(mh, (morningHours.get(mh) || 0) + 1);
+    }
+    if (u.e) {
+      eveningOn++;
+      const eh = +u.eh || DEFAULTS.eh;
+      eveningHours.set(eh, (eveningHours.get(eh) || 0) + 1);
+    }
+    if (u.c) changesOn++;
+    if (u.w) weekOn++;
+    if (u.s) silentOn++;
+
+    const tgt = findTarget(idx, u.g);
+    const isT = String(u.g || "").startsWith("t-") || tgt?.kind === "teacher";
+    if (isT) {
+      teacherUsers++;
+      const label = tgt?.name || u.g;
+      teacherCounts.set(label, (teacherCounts.get(label) || 0) + 1);
+    } else {
+      studentCount++;
+      const gName = tgt?.name || u.g;
+      const crs = tgt?.course || 0;
+      if (crs) courseCounts.set(crs, (courseCounts.get(crs) || 0) + 1);
+      const cur = groupCounts.get(gName) || { name: gName, course: crs, count: 0 };
+      cur.count++;
+      groupCounts.set(gName, cur);
+    }
+  }
+
+  const knownGroups = allGroups(idx);
+  const coveredGroups = [...groupCounts.values()].filter((g) => knownGroups.some((k) => k.name === g.name)).length;
+  const fmtHours = (mp) => [...mp.entries()].sort((a, b) => a[0] - b[0]).map(([h, n]) => `${hh(h)}(${n})`).join(", ");
+
+  const lines = [];
+  if (tab === "groups") {
+    lines.push(`👥 <b>Підписники по групах</b> · ${studentCount} у ${groupCounts.size} групах`);
+    const courses = [...new Set([...Object.keys(idx.courses || {}).map(Number), ...courseCounts.keys()])].filter((c) => c > 0).sort((a, b) => a - b);
+    for (const c of courses) {
+      const cGroups = [...groupCounts.values()].filter((g) => g.course === c).sort((a, b) => b.count - a.count || a.name.localeCompare(b.name, "uk"));
+      if (!cGroups.length) continue;
+      lines.push(`\n<b>${c} курс (${courseCounts.get(c) || 0})</b>`);
+      for (const g of cGroups) lines.push(`• ${esc(g.name)} — <b>${g.count}</b>`);
+    }
+    const zeroGroups = knownGroups.filter((g) => !groupCounts.has(g.name)).map((g) => g.name);
+    if (zeroGroups.length) lines.push(`\n▫️ <i>Ще без підписників (${zeroGroups.length}):</i> ${esc(zeroGroups.join(", "))}`);
+  } else if (tab === "teachers") {
+    lines.push(`🎓 <b>Викладачі та групові чати</b>`);
+    const tSorted = [...teacherCounts.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0], "uk"));
+    if (tSorted.length) {
+      lines.push(`\n<b>Викладачі (${teacherUsers})</b>`);
+      for (const [name, cnt] of tSorted) lines.push(`• ${esc(name)} — <b>${cnt}</b>`);
+    } else {
+      lines.push("\nПоки немає підписок викладачів.");
+    }
+    if (groupChats.length) {
+      lines.push(`\n<b>Групові чати (${groupChats.length})</b>`);
+      for (const gc of groupChats.slice(0, 20)) lines.push(`• <code>${esc(gc.id)}</code> → ${esc(gc.g)}`);
+    } else {
+      lines.push("\n<b>Групові чати:</b> 0");
+    }
+  } else {
+    lines.push(`📊 <b>Статистика бота ПФК НЮУ</b>`);
+    const topLine = [
+      `👥 Усього підписників: <b>${total}</b>` + (todayNew ? ` (📈 сьогодні: <b>+${todayNew}</b>)` : ""),
+      `👤 Приватних: <b>${privateUsers.length}</b> · 💬 Груп-чатів: <b>${groupChats.length}</b>`,
+      `🎓 Студентів: <b>${studentCount}</b> · 👨‍🏫 Викладачів: <b>${teacherUsers}</b>`,
+      `🏫 Охоплено груп: <b>${coveredGroups} / ${knownGroups.length}</b>`,
+    ];
+    lines.push("\n" + topLine.join("\n"));
+
+    const coursesStr = [...courseCounts.entries()].sort((a, b) => a[0] - b[0]).map(([c, n]) => `${c} курс: <b>${n}</b>`).join(" · ");
+    if (coursesStr) lines.push(`\n📚 ${coursesStr}`);
+
+    const topGroups = [...groupCounts.values()].sort((a, b) => b.count - a.count || a.name.localeCompare(b.name, "uk")).slice(0, 10);
+    if (topGroups.length) {
+      lines.push(`\n<b>Топ груп</b>`);
+      for (const g of topGroups) lines.push(`• ${esc(g.name)} — <b>${g.count}</b>`);
+    }
+
+    lines.push(`\n<b>Розсилки та функції</b>`);
+    lines.push(`🌅 Ранок: <b>${morningOn}</b>` + (morningOn ? ` (${fmtHours(morningHours)})` : ""));
+    lines.push(`🌆 Вечір: <b>${eveningOn}</b>` + (eveningOn ? ` (${fmtHours(eveningHours)})` : ""));
+    lines.push(`🔄 Заміни: <b>${changesOn}</b> · 🗓 Тиждень: <b>${weekOn}</b> · 🔕 Тихо: <b>${silentOn}</b>`);
+    lines.push(`🔔 Відпрацювання (нагадування): <b>${csCount}</b>`);
+    lines.push(`🆕 Оновлене меню: <b>${newMenuCount} / ${privateUsers.length}</b>`);
+
+    const hbStr = hb?.ts ? `${kyivTime(hb.ts)}${hb.degraded ? " ⚠️" : ""}` : "немає";
+    lines.push(`\n⚙️ Actions: <b>${esc(hbStr)}</b>` + (idx.updated ? ` · Дані: ${esc(idx.updated.slice(8, 10) + "." + idx.updated.slice(5, 7) + " " + idx.updated.slice(11, 16))}` : ""));
+  }
+
+  lines.push(`\n<i>Станом на ${kyivHMS(nowMs)} (Київ)</i>`);
+  const kb = {
+    inline_keyboard: [
+      [
+        { text: "📊 Огляд", callback_data: "st:main", ...(tab === "main" ? { style: "primary" } : {}) },
+        { text: "👥 Групи", callback_data: "st:groups", ...(tab === "groups" ? { style: "primary" } : {}) },
+        { text: "🎓 Викладачі", callback_data: "st:teachers", ...(tab === "teachers" ? { style: "primary" } : {}) },
+      ],
+      [{ text: "🔄 Оновити", callback_data: `st:${tab}` }],
+    ],
+  };
+  return [lines.join("\n"), kb];
 }
 
 // кнопка «Меню» біля поля вводу відкриває сайт розкладу своєї групи або викладача прямо в Telegram (Mini App)
@@ -531,6 +677,7 @@ async function chooseGroup(env, chatId, site, user, slugOrName, msg) {
   const keyVal = isT ? g.slug : g.name;
   const u = { ...DEFAULTS, ...(user || {}), g: keyVal };
   if (user && user.g !== keyVal) u.sg = 0; // нова група/режим — підгрупа скидається
+  if (!u.at) u.at = kyivISO();
   if (chatId > 0) u.mv = MENU_VER;
   await saveUser(env, chatId, u);
   const data = await groupJSON(env, site, g.slug);
@@ -562,11 +709,7 @@ async function onUpdate(env, upd) {
   if (cb) {
     const d = cb.data || "";
     if (d.startsWith("rs:")) {
-      const hb = await env.USERS.get("hb", "json").catch(() => null);
-      const admins = new Set([
-        ...String(env.TELEGRAM_CHAT_ID || "").split(",").map((s) => s.trim()).filter(Boolean),
-        ...((hb?.admins || []).map(String)),
-      ]);
+      const { admins, hb } = await getAdmins(env);
       const fromId = String(cb.from?.id || "");
       if (admins.size && !admins.has(String(chatId)) && !admins.has(fromId)) {
         return tg(env, "answerCallbackQuery", { callback_query_id: cb.id, text: "Лише адмін може відповісти", show_alert: true });
@@ -606,6 +749,18 @@ async function onUpdate(env, upd) {
         }).catch(() => {});
       }
       return;
+    }
+    if (d.startsWith("st:")) {
+      const { admins, hb } = await getAdmins(env);
+      const fromId = String(cb.from?.id || "");
+      if (!admins.size || (!admins.has(String(chatId)) && !admins.has(fromId))) {
+        return tg(env, "answerCallbackQuery", { callback_query_id: cb.id, text: "Лише адмін може переглядати статистику", show_alert: true });
+      }
+      const tab = d.slice(3) || "main";
+      const [users, csCount] = await Promise.all([listUsers(env), countConsultSubs(env)]);
+      const [stText, stKb] = statsView(site, users, csCount, hb, tab);
+      await tg(env, "answerCallbackQuery", { callback_query_id: cb.id, text: "Оновлено" });
+      return edit(env, cb.message, stText, stKb);
     }
     if (d.startsWith("co:")) {
       tg(env, "answerCallbackQuery", { callback_query_id: cb.id });
@@ -684,6 +839,16 @@ async function onUpdate(env, upd) {
     if (!user) return send(env, chatId, "Спершу обери групу або викладача 👇", coursesKb(index));
     await showSettings(env, chatId, site, user);
     return ensureMenu(env, chatId, user);
+  }
+  if (key === "stats") {
+    const { admins, hb } = await getAdmins(env);
+    const fromId = String(msg.from?.id || "");
+    if (!admins.size || (!admins.has(String(chatId)) && !admins.has(fromId))) {
+      return send(env, chatId, "⛔ Команда доступна лише адміністратору.");
+    }
+    const [users, csCount] = await Promise.all([listUsers(env), countConsultSubs(env)]);
+    const [stText, stKb] = statsView(site, users, csCount, hb, "main");
+    return send(env, chatId, stText, stKb);
   }
   if (key === "consult") {
     const cq = text.replace(/^\/\S+\s*/, "").trim();
@@ -790,6 +955,7 @@ const kyivParts = (ms = Date.now()) => {
   return { iso: `${parts.year}-${parts.month}-${parts.day}`, hour, minute: +parts.minute };
 };
 const kyivTime = (ms) => new Intl.DateTimeFormat("uk-UA", { timeZone: "Europe/Kyiv", day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" }).format(new Date(ms));
+const kyivHMS = (ms = Date.now()) => new Intl.DateTimeFormat("uk-UA", { timeZone: "Europe/Kyiv", hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23" }).format(new Date(ms));
 
 async function loadSiteForCron(env) {
   const bundle = await env.USERS.get("s:site:bundle", "json").catch(() => null);
@@ -858,7 +1024,7 @@ async function deliverChunk(env, batch, budget) {
       }
       const newId = r?.parameters?.migrate_to_chat_id;
       if (!r?.ok && newId) {
-        const meta = { g: u.g, m: bit(u.m), e: bit(u.e), c: bit(u.c), w: bit(u.w), s: bit(u.s), sg: +u.sg || 0, mh: +u.mh || DEFAULTS.mh, eh: +u.eh || DEFAULTS.eh, ...(u.mv ? { mv: +u.mv } : {}) };
+        const meta = { g: u.g, m: bit(u.m), e: bit(u.e), c: bit(u.c), w: bit(u.w), s: bit(u.s), sg: +u.sg || 0, mh: +u.mh || DEFAULTS.mh, eh: +u.eh || DEFAULTS.eh, ...(u.mv ? { mv: +u.mv } : {}), ...(u.at ? { at: String(u.at) } : {}) };
         if (!(await getUser(env, newId))) await saveUser(env, newId, meta);
         await env.USERS.delete("u:" + u.id);
         if (budget.left > 0) {

@@ -785,3 +785,91 @@ test("Mini App (docs/app.js): вкладка Відпрац. (вівторок 1
   assert.ok(els.get("#view").innerHTML.includes("Вища математика"));
   assert.ok(els.get("#checked").textContent.includes("15:10"));
 });
+
+test("воркер: /stats доступно лише адміну і показує зведення, групи та викладачів", async () => {
+  const env = mkEnv({ TELEGRAM_CHAT_ID: "900" });
+  const idx = {
+    hash: "hs1",
+    updated: "2026-11-27T19:00+02:00",
+    courses: {
+      1: [{ name: "СОБ-11", slug: "sob-11" }, { name: "ПД-14", slug: "pd-14" }],
+      2: [{ name: "ПД-21", slug: "pd-21" }],
+    },
+    teachers: [{ name: "Губанов А.Б.", slug: "t-hubanov-a-b", courses: [1, 2], subjects: ["Інформатика"] }],
+  };
+  await api(env, "/api/state/set", { key: "site:bundle", value: { hash: "hs1", updated: idx.updated, index: idx, groups: { "sob-11": GROUP } }, ttl: 86400 });
+  await api(env, "/api/heartbeat", { admins: ["900"], repo: "o/r" });
+  const today = new Intl.DateTimeFormat("en-CA", { timeZone: "Europe/Kyiv", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
+  await env.USERS.put("u:101", "", { metadata: { g: "СОБ-11", m: 1, e: 1, c: 1, w: 1, s: 0, sg: 0, mh: 6, eh: 18, mv: 2, at: today } });
+  await env.USERS.put("u:102", "", { metadata: { g: "ПД-21", m: 1, e: 0, c: 1, w: 0, s: 1, sg: 0, mh: 7, eh: 19 } });
+  await env.USERS.put("u:103", "", { metadata: { g: "t-hubanov-a-b", m: 1, e: 1, c: 1, w: 1, s: 0, sg: 0, mh: 6, eh: 18, mv: 2 } });
+  await env.USERS.put("u:-500", "", { metadata: { g: "СОБ-11", m: 1, e: 1, c: 1, w: 1, s: 0, sg: 0, mh: 6, eh: 18 } });
+  await env.USERS.put("cs:101", JSON.stringify(["t-noha-p-p:1:1410"]));
+
+  // Новий користувач обирає групу СОБ-11 -> записується at = сьогодні
+  calls = [];
+  let done;
+  await worker.fetch(new Request("https://w.test/", {
+    method: "POST",
+    headers: { "X-Telegram-Bot-Api-Secret-Token": SECRET },
+    body: JSON.stringify({ message: { chat: { id: 104, type: "private" }, from: { id: 104 }, text: "СОБ-11" } }),
+  }), env, { waitUntil: (p) => (done = p) });
+  await done;
+  assert.equal((await env.USERS.getWithMetadata("u:104")).metadata.at, today);
+
+  // Чужий користувач не має доступу до /stats і st:*
+  calls = [];
+  await worker.fetch(new Request("https://w.test/", {
+    method: "POST",
+    headers: { "X-Telegram-Bot-Api-Secret-Token": SECRET },
+    body: JSON.stringify({ message: { chat: { id: 101, type: "private" }, from: { id: 101 }, text: "/stats" } }),
+  }), env, { waitUntil: (p) => (done = p) });
+  await done;
+  assert.match(tgSends()[0].body.text, /лише адміністратору/);
+
+  calls = [];
+  await worker.fetch(new Request("https://w.test/", {
+    method: "POST",
+    headers: { "X-Telegram-Bot-Api-Secret-Token": SECRET },
+    body: JSON.stringify({ callback_query: { id: "cb_no", from: { id: 101 }, message: { chat: { id: 101 }, message_id: 1, text: "x" }, data: "st:groups" } }),
+  }), env, { waitUntil: (p) => (done = p) });
+  await done;
+  assert.ok(calls.some((c) => c.url.endsWith("/answerCallbackQuery") && c.body.show_alert === true));
+
+  // Адмін отримує /stats
+  calls = [];
+  await worker.fetch(new Request("https://w.test/", {
+    method: "POST",
+    headers: { "X-Telegram-Bot-Api-Secret-Token": SECRET },
+    body: JSON.stringify({ message: { chat: { id: 900, type: "private" }, from: { id: 900 }, text: "/stats" } }),
+  }), env, { waitUntil: (p) => (done = p) });
+  await done;
+  const stMsg = tgSends()[0].body;
+  assert.ok(stMsg.text.includes("Усього підписників: <b>5</b>") && stMsg.text.includes("сьогодні: <b>+2</b>"));
+  assert.ok(stMsg.text.includes("Приватних: <b>4</b>") && stMsg.text.includes("Груп-чатів: <b>1</b>"));
+  assert.ok(stMsg.text.includes("Студентів: <b>4</b>") && stMsg.text.includes("Викладачів: <b>1</b>"));
+  assert.ok(stMsg.text.includes("Охоплено груп: <b>2 / 3</b>"));
+  assert.ok(stMsg.text.includes("СОБ-11 — <b>3</b>"));
+  assert.ok(stMsg.text.includes("Відпрацювання (нагадування): <b>1</b>"));
+
+  // Перемикання вкладок st:groups і st:teachers
+  calls = [];
+  await worker.fetch(new Request("https://w.test/", {
+    method: "POST",
+    headers: { "X-Telegram-Bot-Api-Secret-Token": SECRET },
+    body: JSON.stringify({ callback_query: { id: "cb_g", from: { id: 900 }, message: { chat: { id: 900 }, message_id: 50, text: "stats" }, data: "st:groups" } }),
+  }), env, { waitUntil: (p) => (done = p) });
+  await done;
+  const gText = calls.find((c) => c.url.endsWith("/editMessageText")).body.text;
+  assert.ok(gText.includes("1 курс (3)") && gText.includes("ПД-21 — <b>1</b>") && gText.includes("ПД-14"));
+
+  calls = [];
+  await worker.fetch(new Request("https://w.test/", {
+    method: "POST",
+    headers: { "X-Telegram-Bot-Api-Secret-Token": SECRET },
+    body: JSON.stringify({ callback_query: { id: "cb_t", from: { id: 900 }, message: { chat: { id: 900 }, message_id: 50, text: "stats" }, data: "st:teachers" } }),
+  }), env, { waitUntil: (p) => (done = p) });
+  await done;
+  const tText = calls.find((c) => c.url.endsWith("/editMessageText")).body.text;
+  assert.ok(tText.includes("Губанов А.Б. — <b>1</b>") && tText.includes("Групові чати (1)"));
+});
