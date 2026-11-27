@@ -1,6 +1,6 @@
-/* Service worker: працює офлайн (останній завантажений розклад), дані — спершу з мережі */
-const CACHE = "rozklad-v6";
-const SHELL = ["./", "index.html", "style.css", "app.js", "manifest.webmanifest", "icon.svg"];
+/* Service worker: працює офлайн (останній завантажений розклад), дані й код інтерфейсу — спершу з мережі */
+const CACHE = "rozklad-v7";
+const SHELL = ["./", "index.html", "manifest.webmanifest", "icon.svg"];
 
 self.addEventListener("install", (e) => {
   e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting()));
@@ -11,8 +11,10 @@ self.addEventListener("activate", (e) => {
 self.addEventListener("fetch", (e) => {
   const url = new URL(e.request.url);
   if (e.request.method !== "GET" || url.origin !== location.origin) return;
-  const isData = url.pathname.includes("/data/") || url.pathname.endsWith(".ics");
-  if (isData || url.pathname.endsWith("/") || url.pathname.endsWith(".html")) {
+  const isFresh = url.pathname.includes("/data/") || url.pathname.endsWith(".ics")
+    || url.pathname.endsWith("/") || url.pathname.endsWith(".html")
+    || url.pathname.endsWith(".js") || url.pathname.endsWith(".css");
+  if (isFresh) {
     // network-first
     e.respondWith(fetch(e.request).then((r) => {
       const copy = r.clone();
@@ -22,7 +24,7 @@ self.addEventListener("fetch", (e) => {
     }).catch(() => caches.match(url.origin + url.pathname).then((r) => r || caches.match("index.html"))));
     return;
   }
-  // cache-first для статики
+  // cache-first для іконок/маніфесту
   e.respondWith(caches.match(e.request).then((r) => r || fetch(e.request).then((resp) => {
     const copy = resp.clone(); caches.open(CACHE).then((c) => c.put(e.request, copy)); return resp;
   })));

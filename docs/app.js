@@ -285,7 +285,9 @@ function tick() {
 function teacherCardsHTML(query = "") {
   const q = String(query || "").trim().toLowerCase();
   const list = (INDEX.teachers || []).filter((t) =>
-    !q || t.name.toLowerCase().includes(q) || (t.subjects || []).some((s) => s.toLowerCase().includes(q))
+    !q || t.name.toLowerCase().includes(q)
+    || (t.aliases || []).some((a) => a.toLowerCase().includes(q))
+    || (t.subjects || []).some((s) => s.toLowerCase().includes(q))
   );
   if (!list.length) return `<div class="empty">${svg("users")}Нікого не знайдено за «${esc(query)}»</div>`;
   return `<div class="days pick teachers">${list.map((t) =>
@@ -312,20 +314,25 @@ function pickerHTML() {
 function targetByNameOrSlug(name) {
   const raw = String(name || "").trim();
   if (!raw) return null;
-  for (const gs of Object.values(INDEX.courses)) {
+  for (const gs of Object.values(INDEX.courses || {})) {
     for (const g of gs) if (g.name === raw || g.slug === raw) return { ...g, kind: "group" };
   }
   const low = raw.toLowerCase();
   const firstWord = low.split(/\s+/)[0];
-  return (INDEX.teachers || []).find((t) => t.name === raw || t.slug === low || t.name.toLowerCase() === low)
-    || (firstWord.length >= 3 ? (INDEX.teachers || []).find((t) => t.name.toLowerCase().startsWith(firstWord + " ")) : null)
-    || null;
+  const t = (INDEX.teachers || []).find((x) =>
+    x.name === raw || x.slug === low || x.name.toLowerCase() === low
+    || (x.aliases || []).some((a) => a.toLowerCase() === low)
+  ) || (firstWord.length >= 3 ? (INDEX.teachers || []).find((x) =>
+    x.name.toLowerCase().startsWith(firstWord + " ")
+    || (x.aliases || []).some((a) => a.toLowerCase().startsWith(firstWord + " "))
+  ) : null);
+  return t ? { ...t, kind: "teacher" } : null;
 }
 
 async function selectGroup(name) {
   const g = targetByNameOrSlug(name);
   if (!g) { TAB = "pick"; render(); return; }
-  const isT = g.kind === "teacher";
+  const isT = g.kind === "teacher" || String(g.slug || "").startsWith("t-");
   const path = isT ? `data/t/${g.slug}.json` : `data/g/${g.slug}.json`;
   try {
     SITE = await (await fetch(`${path}?` + (INDEX.hash || Date.now()), { cache: "no-cache" })).json();
@@ -374,6 +381,12 @@ async function init() {
     if (!SITE) return;
     TAB = b.dataset.tab; history.replaceState(null, "", location.pathname + location.search + "#" + TAB); render(); window.scrollTo({ top: 0, behavior: "smooth" });
   }));
+  const brand = $("#brand-btn");
+  if (brand) {
+    const openPicker = () => { PICK_MODE = isTeacher() ? "teacher" : "student"; TAB = "pick"; render(); window.scrollTo({ top: 0, behavior: "smooth" }); };
+    brand.addEventListener("click", openPicker);
+    brand.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openPicker(); } });
+  }
   if (!["today", "tomorrow", "week", "changes", "more"].includes(TAB)) TAB = "today";
   const qs = new URLSearchParams(location.search);
   const tParam = qs.get("t");
