@@ -1,14 +1,14 @@
 {
   "name": "Розклад ПФК НЮУ",
   "short_name": "Розклад",
-  "description": "Пари, заміни й таймер для всіх груп ПФК НЮУ",
+  "description": "Пари, заміни, таймер і відпрацювання для всіх груп і викладачів ПФК НЮУ",
   "lang": "uk",
   "start_url": "./#today",
   "scope": "./",
   "display": "standalone",
   "orientation": "portrait",
-  "background_color": "#eef2ff",
-  "theme_color": "#4338ca",
+  "background_color": "#F6F5FB",
+  "theme_color": "#3E3577",
   "icons": [
     { "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" },
     { "src": "icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
@@ -17,6 +17,7 @@
   ],
   "shortcuts": [
     { "name": "Завтра", "url": "./#tomorrow" },
+    { "name": "Відпрацювання", "url": "./#consult" },
     { "name": "Заміни", "url": "./#changes" }
   ]
 }

@@ -1,6 +1,15 @@
 /* Service worker: працює офлайн (останній завантажений розклад), дані й код інтерфейсу — спершу з мережі */
-const CACHE = "rozklad-v7";
-const SHELL = ["./", "index.html", "manifest.webmanifest", "icon.svg"];
+const CACHE = "rozklad-v11";
+const SHELL = [
+  "./",
+  "index.html",
+  "manifest.webmanifest",
+  "icon.svg",
+  "logo.png",
+  "icon-192.png",
+  "fonts/manrope-cyrillic.woff2",
+  "fonts/manrope-latin.woff2",
+];
 
 self.addEventListener("install", (e) => {
   e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting()));
@@ -24,7 +33,7 @@ self.addEventListener("fetch", (e) => {
     }).catch(() => caches.match(url.origin + url.pathname).then((r) => r || caches.match("index.html"))));
     return;
   }
-  // cache-first для іконок/маніфесту
+  // cache-first для іконок, шрифтів і маніфесту
   e.respondWith(caches.match(e.request).then((r) => r || fetch(e.request).then((resp) => {
     const copy = resp.clone(); caches.open(CACHE).then((c) => c.put(e.request, copy)); return resp;
   })));
